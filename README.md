@@ -43,6 +43,15 @@ montajes portada plantilla --formato 148x210 --paginas 240 --papel bond75 --tapa
 montajes lomo --paginas 240 --papel bond75 --portada brillante300 --tolerancia 0.5
 ```
 
+## Publicación
+
+La app está publicada en **https://montajes.atrioagencia.com** (Hostinger, sitio estático). Para publicar una versión nueva:
+
+```sh
+scripts/construir-web.sh
+HOSTINGER_TOKEN=... scripts/publicar-hostinger.sh
+```
+
 ## Desarrollo
 
 ```sh
