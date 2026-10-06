@@ -283,4 +283,6 @@ Trabajo
   - Armado desde páginas sueltas, o verificación de una portada completa.
   - Comando `montajes portada`.
 - [x] **App web** (`web/`): inicio, piezas, libros, portadas y catálogos con el diseño dormi. Tiene vista previa del pliego en vivo, catálogos guardados en el navegador (con exportar e importar) y perfiles ICC por máquina.
+- [x] **Preflight (fase 5, primera parte)**: fuentes no incrustadas, color RGB o Lab, tintas directas, resolución efectiva de imágenes (siguiendo la CTM), line art, cobertura total de tinta en rellenos CMYK, líneas finas, transparencias (error en PDF/X-1a), TrimBox, rebase y anotaciones. Disponible con `montajes preflight` y en la web.
+- [x] **Vista previa con el contenido real** de cada página (pdf.js), colocada con la misma matriz que usa el motor.
 - [ ] Fase 3, pendiente: firmas de 12/24 pp, varias firmas iguales por pliego (work & turn de firmas), insertos.

@@ -16,6 +16,7 @@ use montajes_core::imposicion::{Margenes, Volteo};
 use montajes_core::libro;
 use montajes_core::pdf::{self, Fuente, OpcionesSalida, mm_es};
 use montajes_core::portada::{self, ParametrosPortada, Portada, TipoPanel, TipoPortada};
+use montajes_core::preflight::{self, Nivel, OpcionesPreflight};
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +42,8 @@ enum Comando {
     Papel(ComandoPapel),
     /// Muestra tamaño final, rebase y giro de cada página de un PDF.
     Info { pdf: PathBuf },
+    /// Revisa el PDF antes de imprimir (fuentes, color, resolución, tinta…).
+    Preflight(ArgsPreflight),
     /// Calcula el lomo de un libro al lomo (PUR, hot-melt, cosido).
     Lomo(ArgsLomo),
     /// Montaje de piezas repetidas: volantes, tarjetas, etiquetas.
@@ -302,6 +305,22 @@ struct ArgsLibro {
     simular: bool,
 }
 
+#[derive(Args)]
+struct ArgsPreflight {
+    pdf: PathBuf,
+    /// Rebase requerido en mm.
+    #[arg(long, default_value_t = 3.0)]
+    rebase: f64,
+    #[arg(long, value_enum, default_value = "x4")]
+    pdfx: Pdfx,
+    /// Cobertura total de tinta máxima (%).
+    #[arg(long, default_value_t = 320.0)]
+    cobertura: f64,
+    /// Resolución mínima de imágenes (ppi).
+    #[arg(long, default_value_t = 150.0)]
+    ppi: f64,
+}
+
 #[derive(Subcommand)]
 enum ComandoPortada {
     /// PDF con las guías para que el diseñador arme la portada.
@@ -424,6 +443,7 @@ fn ejecutar() -> Result<()> {
         Comando::Maquina(c) => maquina(&datos, c),
         Comando::Papel(c) => papel(&datos, c),
         Comando::Info { pdf } => info(&pdf),
+        Comando::Preflight(a) => preflight_cmd(a),
         Comando::Lomo(a) => lomo(&datos, a),
         Comando::Nup(a) => nup(&datos, a),
         Comando::Libro(a) => libro_cmd(&datos, a),
@@ -911,4 +931,35 @@ fn portada_cmd(datos: &Path, c: ComandoPortada) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn preflight_cmd(a: ArgsPreflight) -> Result<()> {
+    let f = Fuente::abrir(&a.pdf).with_context(|| format!("no se pudo abrir {}", a.pdf.display()))?;
+    let op = OpcionesPreflight {
+        pdfx: match a.pdfx {
+            Pdfx::X4 => VersionPdfx::X4,
+            Pdfx::X1a => VersionPdfx::X1a,
+        },
+        rebase: a.rebase,
+        cobertura_maxima: a.cobertura,
+        ppi_error: a.ppi,
+        ppi_advertencia: a.ppi.max(250.0),
+        ..OpcionesPreflight::default()
+    };
+    let inf = preflight::revisar(&f, &op);
+    println!("{}: {} páginas", a.pdf.display(), f.paginas.len());
+    for h in &inf.hallazgos {
+        let marca = match h.nivel {
+            Nivel::Error => "✗ ERROR",
+            Nivel::Advertencia => "⚠ aviso",
+            Nivel::Info => "· info ",
+        };
+        println!("{marca}  {} (págs. {})", h.mensaje, preflight::rango_paginas(&h.paginas));
+    }
+    if inf.listo() {
+        println!("✓ Listo para imprimir ({} advertencias)", inf.advertencias);
+        Ok(())
+    } else {
+        bail!("{} errores y {} advertencias", inf.errores, inf.advertencias)
+    }
 }

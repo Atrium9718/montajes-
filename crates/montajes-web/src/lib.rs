@@ -11,6 +11,7 @@ use montajes_core::imposicion::nup::{self, Distribucion, Orientacion, Parametros
 use montajes_core::imposicion::{Cara, Margenes, Volteo};
 use montajes_core::pdf::{self, Fuente, OpcionesSalida};
 use montajes_core::portada::{self, ParametrosPortada, Portada, TipoPanel, TipoPortada};
+use montajes_core::preflight::{self, OpcionesPreflight};
 use montajes_core::{Error, libro};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -53,6 +54,10 @@ pub fn papeles_referencia() -> String {
 
 #[derive(Serialize)]
 struct InfoPagina {
+    /// CropBox y TrimBox sin girar, en mm y en coordenadas de la página
+    /// (para colocar la miniatura igual que el motor coloca la página).
+    vista: [f64; 4],
+    corte: [f64; 4],
     ancho: f64,
     alto: f64,
     rebase: f64,
@@ -76,7 +81,10 @@ pub fn analizar(pdf: &[u8]) -> R<String> {
         .iter()
         .map(|p| {
             let t = p.tamano_corte();
+            let mm = |c: &pdf::Caja| [c.x0, c.y0, c.x1, c.y1].map(montajes_core::unidades::pt_a_mm);
             InfoPagina {
+                vista: mm(&p.vista),
+                corte: mm(&p.corte),
                 ancho: t.ancho,
                 alto: t.alto,
                 rebase: p.rebase_disponible(),
@@ -128,6 +136,43 @@ fn escribir(
     let mut bytes = Vec::new();
     doc.save_to(&mut bytes).map_err(error)?;
     Ok((bytes, informe.avisos, informe.pdfx_identificado))
+}
+
+// ───────────────────────── Preflight ─────────────────────────
+
+#[derive(Deserialize)]
+struct PeticionPreflight {
+    #[serde(default)]
+    pdfx: Option<VersionPdfx>,
+    #[serde(default = "tres")]
+    rebase: f64,
+    #[serde(default)]
+    cobertura: Option<f64>,
+}
+
+/// Revisión del PDF antes de imprimir.
+#[wasm_bindgen]
+pub fn revisar_pdf(pdf: &[u8], peticion: &str) -> R<String> {
+    let p: PeticionPreflight = serde_json::from_str(peticion).map_err(error)?;
+    let f = Fuente::desde_bytes(pdf).map_err(error)?;
+    let base = OpcionesPreflight::default();
+    let op = OpcionesPreflight {
+        pdfx: p.pdfx.unwrap_or(base.pdfx),
+        rebase: p.rebase,
+        cobertura_maxima: p.cobertura.unwrap_or(base.cobertura_maxima),
+        ..base
+    };
+    let mut inf = preflight::revisar(&f, &op);
+    // Rango legible para la interfaz.
+    #[derive(Serialize)]
+    struct Salida<'a> {
+        #[serde(flatten)]
+        informe: &'a preflight::InformePreflight,
+        rangos: Vec<String>,
+    }
+    inf.hallazgos.truncate(60);
+    let rangos = inf.hallazgos.iter().map(|h| preflight::rango_paginas(&h.paginas)).collect();
+    serde_json::to_string(&Salida { informe: &inf, rangos }).map_err(error)
 }
 
 // ───────────────────────── Piezas sueltas ─────────────────────────

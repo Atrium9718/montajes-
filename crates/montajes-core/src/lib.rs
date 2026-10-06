@@ -11,6 +11,7 @@ pub mod imposicion;
 pub mod libro;
 pub mod pdf;
 pub mod portada;
+pub mod preflight;
 pub mod unidades;
 
 pub use error::{Error, Resultado};

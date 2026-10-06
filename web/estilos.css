@@ -257,3 +257,19 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; margin-t
 }
 .aviso-flotante.visible { transform: translate(-50%, 0); opacity: 1; visibility: visible; }
 @media (max-width: 720px) { .aviso-flotante { bottom: 96px; } }
+
+/* Revisión del PDF (preflight), como la lista de hábitos de dormi */
+.revision { display: grid; gap: 10px; }
+.revision-cabeza { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sello { font-size: 13px; font-weight: 700; padding: 5px 12px; border-radius: 999px; }
+.sello-ok { background: var(--lima); color: #111; }
+.sello-aviso { background: color-mix(in srgb, var(--naranja) 18%, var(--superficie)); color: var(--tinta); }
+.sello-error { background: var(--error); color: #fff; }
+.revision details summary { cursor: pointer; font-size: 14px; color: var(--tinta-suave); }
+.revision-lista { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.revision-lista li { display: grid; grid-template-columns: 18px 1fr; column-gap: 8px; font-size: 14px; line-height: 1.35; }
+.revision-lista li::before { content: ""; width: 14px; height: 14px; border-radius: 5px; margin-top: 2px; grid-row: span 2; }
+.revision-lista small { color: var(--gris); font-size: 12px; }
+.revision-error::before { background: var(--error); }
+.revision-advertencia::before { background: var(--naranja); }
+.revision-info::before { background: var(--lavanda); }

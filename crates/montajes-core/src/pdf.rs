@@ -49,6 +49,8 @@ impl Caja {
 pub struct PaginaFuente {
     pub id: ObjectId,
     pub media: Caja,
+    /// CropBox (lo que muestra un visor); por defecto la MediaBox.
+    pub vista: Caja,
     /// TrimBox (o CropBox/MediaBox si no está definida).
     pub corte: Caja,
     /// Hasta dónde llega el contenido utilizable como rebase.
@@ -109,7 +111,15 @@ impl Fuente {
             let giro = heredado(&doc, id, b"Rotate")
                 .and_then(|o| resolver(&doc, &o).as_i64().ok())
                 .map_or(0, |r| r.rem_euclid(360) as u16 / 90 * 90);
-            paginas.push(PaginaFuente { id, media, corte, sangrado, giro, tiene_trimbox: trim.is_some() });
+            paginas.push(PaginaFuente {
+                id,
+                media,
+                vista: recorte,
+                corte,
+                sangrado,
+                giro,
+                tiene_trimbox: trim.is_some(),
+            });
         }
         if paginas.is_empty() {
             return Err(Error::Invalido("el PDF no tiene páginas".into()));
@@ -118,7 +128,7 @@ impl Fuente {
     }
 }
 
-fn resolver<'a>(doc: &'a Document, o: &'a Object) -> &'a Object {
+pub(crate) fn resolver<'a>(doc: &'a Document, o: &'a Object) -> &'a Object {
     match o {
         Object::Reference(id) => doc.get_object(*id).unwrap_or(o),
         _ => o,
@@ -126,6 +136,11 @@ fn resolver<'a>(doc: &'a Document, o: &'a Object) -> &'a Object {
 }
 
 impl Fuente {
+    /// Documento original (solo lectura), para revisiones como el preflight.
+    pub fn documento(&self) -> &Document {
+        &self.doc
+    }
+
     /// Formato común de todas las páginas (o el pedido) y avisos de rebase.
     /// Falla si alguna página mide distinto.
     pub fn formato_comun(&self, formato: Option<Tamano>, rebase: f64) -> Resultado<(Tamano, Vec<String>)> {

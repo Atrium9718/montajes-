@@ -174,15 +174,45 @@ function tarjetaArchivo(archivo, info, idQuitar) {
 
 function analizarArchivo(trabajo, archivo) {
   trabajo.archivo = archivo;
+  trabajo.mini = {};
+  trabajo.pdfjs = null;
   trabajo.error = null;
   trabajo.cara = 0;
   try {
     trabajo.info = JSON.parse(motor.analizar(archivo.bytes));
     if (!trabajo.info.formato) trabajo.error = "Las páginas del PDF tienen tamaños distintos. Revisa que todas tengan el mismo formato final (TrimBox).";
+    revisarArchivo(trabajo);
   } catch (e) {
     trabajo.info = null;
     trabajo.error = `No se pudo leer el PDF: ${e.message || e}`;
   }
+}
+
+// Preflight: revisión del PDF con la versión PDF/X de la máquina elegida.
+function revisarArchivo(trabajo, maquina) {
+  trabajo.preflight = null;
+  if (!trabajo.archivo) return;
+  const m = maquina || estado.maquinas.find((x) => x.id === estado.preferencias.maquina) || estado.maquinas[0];
+  try {
+    trabajo.preflight = JSON.parse(motor.revisar_pdf(trabajo.archivo.bytes, JSON.stringify({ rebase: trabajo.op.rebase, pdfx: m?.salida?.pdfx || "PDF/X-4" })));
+  } catch (e) {
+    trabajo.preflight = { hallazgos: [], errores: 0, advertencias: 0, falla: String(e.message || e) };
+  }
+}
+
+function bloquePreflight(trabajo) {
+  const p = trabajo.preflight;
+  if (!p) return "";
+  if (p.falla) return `<div class="error-caja">No se pudo revisar el PDF: ${esc(p.falla)}</div>`;
+  const listo = p.errores === 0;
+  const resumen = listo && p.advertencias === 0
+    ? `<span class="sello sello-ok">✓ Listo para imprimir</span>`
+    : `<span class="sello ${listo ? "sello-aviso" : "sello-error"}">${p.errores ? `${p.errores} ${p.errores === 1 ? "error" : "errores"}` : ""}${p.errores && p.advertencias ? " · " : ""}${p.advertencias ? `${p.advertencias} ${p.advertencias === 1 ? "aviso" : "avisos"}` : ""}</span>`;
+  const items = p.hallazgos.map((h, i) => `<li class="revision-${h.nivel}"><span>${esc(h.mensaje)}</span><small>${h.paginas.length === trabajo.info?.paginas.length && h.paginas.length > 1 ? "todas las páginas" : `pág. ${esc(p.rangos[i])}`}</small></li>`).join("");
+  return `<div class="revision">
+    <div class="revision-cabeza"><b>Revisión del PDF</b>${resumen}</div>
+    ${items ? `<details ${p.errores ? "open" : ""}><summary>${p.hallazgos.length} ${p.hallazgos.length === 1 ? "punto" : "puntos"} revisados</summary><ul class="revision-lista">${items}</ul></details>` : ""}
+  </div>`;
 }
 
 function chips(nombre, opciones, valor) {
@@ -215,6 +245,65 @@ function listaAvisos(avisos) {
   return unicos.length ? `<ul class="avisos">${unicos.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>` : "";
 }
 
+// ───────────── Miniaturas reales (pdf.js) ─────────────
+// pdf.js solo dibuja las miniaturas de la vista previa; el PDF de salida lo
+// escribe siempre el motor, sin rasterizar.
+const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38";
+let pdfjsLib = null;
+async function cargarPdfjs() {
+  if (!pdfjsLib) {
+    pdfjsLib = await import(`${PDFJS}/pdf.min.mjs`);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS}/pdf.worker.min.mjs`;
+  }
+  return pdfjsLib;
+}
+
+async function pedirMiniaturas(trabajo, indices, redibujar) {
+  if (!trabajo.archivo) return;
+  trabajo.mini ??= {};
+  const faltan = [...new Set(indices)].filter((i) => !(i in trabajo.mini));
+  if (!faltan.length) return;
+  for (const i of faltan) trabajo.mini[i] = null; // pedida
+  const archivo = trabajo.archivo;
+  try {
+    const lib = await cargarPdfjs();
+    trabajo.pdfjs ??= lib.getDocument({ data: archivo.bytes.slice() }).promise;
+    const doc = await trabajo.pdfjs;
+    for (const i of faltan) {
+      if (trabajo.archivo !== archivo) return;
+      const pagina = await doc.getPage(i + 1);
+      const base = pagina.getViewport({ scale: 1, rotation: 0 });
+      const vp = pagina.getViewport({ scale: Math.min(2.5, 700 / Math.max(base.width, base.height)), rotation: 0 });
+      const lienzo = Object.assign(document.createElement("canvas"), { width: Math.ceil(vp.width), height: Math.ceil(vp.height) });
+      const ctx = lienzo.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, lienzo.width, lienzo.height);
+      await pagina.render({ canvasContext: ctx, viewport: vp }).promise;
+      trabajo.mini[i] = lienzo.toDataURL("image/jpeg", 0.82);
+    }
+  } catch (e) {
+    console.warn("Miniaturas no disponibles:", e);
+    for (const i of faltan) trabajo.mini[i] = false;
+  }
+  if (trabajo.archivo === archivo) redibujar();
+}
+
+/** a × b: primero a, luego b (convención PDF). */
+const multiplicar = (a, b) => [
+  a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+  a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+  a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5],
+];
+/** La misma matriz que usa el motor (pdf::matriz_colocacion), en mm. */
+function matrizColocacion([x0, y0, x1, y1], giro, tx, ty) {
+  switch (giro % 360) {
+    case 90: return [0, -1, 1, 0, tx - y0, ty + x1];
+    case 180: return [-1, 0, 0, -1, tx + x1, ty + y1];
+    case 270: return [0, 1, -1, 0, tx + y1, ty - x0];
+    default: return [1, 0, 0, 1, tx - x0, ty - y0];
+  }
+}
+
 // ───────────── Vista previa del pliego ─────────────
 const COLORES = ["#4c9ef3", "#e4ea5b", "#ff6b2c", "#8b8cf0"];
 
@@ -231,8 +320,27 @@ function svgCara(cara, maquina, opciones = {}) {
     partes.push(`<text x="${W / 2}" y="${H - maquina.pinza / 2}" font-size="${Math.max(Math.min(maquina.pinza * 0.7, W / 45), 3)}" text-anchor="middle" dominant-baseline="middle" fill="var(--naranja)" font-weight="700" letter-spacing=".1em">PINZA</text>`);
   }
   if (cara.cajas) partes.push(r(cara.cajas.sangrado, `fill="none" stroke="#d93b2b" stroke-width="${W / 900}"`));
-  for (const u of cara.ubicaciones) {
+  const { info, mini } = opciones;
+  cara.ubicaciones.forEach((u, k) => {
     const color = COLORES[u.pagina % COLORES.length];
+    const imagen = mini?.[u.pagina];
+    const pag = info?.paginas[u.pagina];
+    if (imagen && pag) {
+      // Página real: CropBox dibujada por pdf.js, llevada al pliego con la
+      // matriz del motor y recortada al rebase permitido.
+      const [vx0, vy0, vx1, vy1] = pag.vista;
+      const m = matrizColocacion(pag.corte, (pag.giro + u.giro) % 360, u.corte.x, u.corte.y);
+      const t = multiplicar(multiplicar([1, 0, 0, -1, vx0, vy1], m), [1, 0, 0, -1, 0, H]);
+      const id = `rc-${opciones.clave || "c"}-${k}`;
+      partes.push(`<clipPath id="${id}">${r(u.recorte)}</clipPath><g clip-path="url(#${id})"><image href="${imagen}" x="0" y="0" width="${vx1 - vx0}" height="${vy1 - vy0}" preserveAspectRatio="none" transform="matrix(${t.map((v) => +v.toFixed(4)).join(" ")})"/></g>`);
+      partes.push(r(u.corte, `fill="none" stroke="var(--tinta)" stroke-width="${W / 1100}" stroke-opacity=".5"`));
+      if (opciones.numeros !== false && opciones.insignias) {
+        const tam = Math.min(u.corte.ancho, u.corte.alto) * 0.16;
+        const cx = u.corte.x + tam * 0.8, cy = y(u.corte.y + u.corte.alto) + tam * 0.8;
+        partes.push(`<circle cx="${cx}" cy="${cy}" r="${tam * 0.62}" fill="var(--oscuro)"/><text x="${cx}" y="${cy}" font-size="${tam * 0.62}" font-weight="700" text-anchor="middle" dominant-baseline="central" fill="#fff">${u.pagina + 1}</text>`);
+      }
+      return;
+    }
     partes.push(r(u.recorte, `fill="${color}" opacity=".28"`));
     partes.push(r(u.corte, `fill="${color}" fill-opacity=".55" stroke="var(--tinta)" stroke-width="${W / 900}"`));
     if (opciones.numeros !== false) {
@@ -242,7 +350,7 @@ function svgCara(cara, maquina, opciones = {}) {
       partes.push(`<g transform="rotate(${u.giro} ${cx} ${cy})"><text x="${cx}" y="${cy}" font-size="${t}" font-weight="800" text-anchor="middle" dominant-baseline="central" fill="var(--tinta)">${u.pagina + 1}</text>
         <rect x="${cx - t * 0.5}" y="${cy - t * 0.95}" width="${t}" height="${t * 0.09}" rx="${t * 0.04}" fill="var(--tinta)"/></g>`);
     }
-  }
+  });
   const m = cara.marcas;
   const trazo = W / 1000;
   for (const l of m.corte) partes.push(`<line x1="${l.x1}" y1="${y(l.y1)}" x2="${l.x2}" y2="${y(l.y2)}" stroke="var(--tinta)" stroke-width="${trazo * 1.2}"/>`);
@@ -257,7 +365,7 @@ function svgCara(cara, maquina, opciones = {}) {
   return `<svg viewBox="${-W * 0.01} ${-H * 0.01} ${W * 1.02} ${H * 1.02}" role="img" aria-label="${esc(cara.nombre)}: pliego de ${mm(W, 0)} por ${mm(H, 0)} mm">${partes.join("")}</svg>`;
 }
 
-function tarjetaVistaPrevia(trabajo, maquina, titulo) {
+function tarjetaVistaPrevia(trabajo, maquina, titulo, insignias = false) {
   const caras = trabajo.plan?.caras || trabajo.plan?.plan?.caras;
   if (!caras?.length) {
     return `<section class="tarjeta vista-previa"><div class="lienzo"><div class="vacio"><span class="orbe orbe-respira" aria-hidden="true"></span><p>${titulo}</p></div></div></section>`;
@@ -273,7 +381,7 @@ function tarjetaVistaPrevia(trabajo, maquina, titulo) {
         <button class="boton boton-claro boton-chico" data-cara="${i + 1}" ${i === caras.length - 1 ? "disabled" : ""} aria-label="Pliego siguiente">→</button>
       </div>
     </div>
-    <div class="lienzo">${svgCara(caras[i], maquina)}</div>
+    <div class="lienzo">${svgCara(caras[i], maquina, { info: trabajo.info, mini: trabajo.mini, insignias, clave: i })}</div>
     <div class="leyenda"><span><i style="border-color:var(--tinta)"></i>Corte</span><span><i style="border-color:#c03ac0;border-top-style:dashed"></i>Pliegue</span><span><i style="border-color:var(--gris);border-top-style:dashed"></i>Área imprimible</span><span><i style="border-color:var(--naranja)"></i>Pinza</span></div>
   </section>`;
 }
@@ -293,6 +401,7 @@ function vistaPiezas(main) {
         <section class="tarjeta paso ${t.info ? "listo" : ""}">
           <div class="paso-titulo"><span class="paso-num">1</span><h3>Archivo</h3></div>
           ${t.archivo ? tarjetaArchivo(t.archivo, t.info, "pz-cambiar") : zonaArchivo("pz-archivo", "Sube el PDF de la pieza")}
+          ${bloquePreflight(t)}
         </section>
         <section class="tarjeta paso">
           <div class="paso-titulo"><span class="paso-num">2</span><h3>Montaje</h3></div>
@@ -333,9 +442,10 @@ function vistaPiezas(main) {
   };
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
     if (el.type === "file") return;
-    const antes = o.dorso;
+    const antes = { dorso: o.dorso, rebase: o.rebase, maquina: estado.preferencias.maquina };
     leerOpciones();
-    if (antes !== o.dorso) vistaPiezas(main); else calcularPiezas();
+    if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaPiezas(main); return; }
+    if (antes.dorso !== o.dorso) vistaPiezas(main); else calcularPiezas();
   }));
   conectarChips(main, (n, v) => { o[n] = v; calcularPiezas(); });
   calcularPiezas();
@@ -387,6 +497,8 @@ function calcularPiezas() {
     </section>` : ""}
     ${listaAvisos(t.plan?.avisos)}
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver el pliego" : "Sube un PDF para ver el montaje")}`;
+  const carasPz = t.plan?.caras;
+  if (carasPz?.length) pedirMiniaturas(t, carasPz[Math.min(t.cara, carasPz.length - 1)].ubicaciones.map((u) => u.pagina), calcularPiezas);
   if (!pintar(caja, html)) return;
   conectarPaginador(caja, t, calcularPiezas);
   $("#pz-generar")?.addEventListener("click", async (e) => {
@@ -417,6 +529,7 @@ function vistaLibro(main) {
         <section class="tarjeta paso ${t.info ? "listo" : ""}">
           <div class="paso-titulo"><span class="paso-num">1</span><h3>Tripa (interior)</h3></div>
           ${t.archivo ? tarjetaArchivo(t.archivo, t.info, "lb-cambiar") : zonaArchivo("lb-archivo", "Sube el PDF del interior")}
+          ${bloquePreflight(t)}
         </section>
         <section class="tarjeta paso">
           <div class="paso-titulo"><span class="paso-num">2</span><h3>Encuadernación</h3></div>
@@ -448,6 +561,7 @@ function vistaLibro(main) {
   $("#lb-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaLibro(main); });
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
     if (el.type === "file") return;
+    const antes = { rebase: o.rebase, maquina: estado.preferencias.maquina };
     o.rebase = num($("#lb-rebase").value, 3);
     o.refile = num($("#lb-refile").value, 3);
     o.fresado = num($("#lb-fresado").value, 3);
@@ -457,6 +571,7 @@ function vistaLibro(main) {
     o.tira = $("#lb-tira").checked;
     if ($("#lb-maquina")) preferir("maquina", $("#lb-maquina").value);
     preferir("papelTripa", $("#lb-papel").value);
+    if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaLibro(main); return; }
     calcularLibro();
   }));
   conectarChips(main, (n, v) => { o[n] = v; t.cara = 0; if (n === "encuadernacion") vistaLibro(main); else calcularLibro(); });
@@ -520,7 +635,9 @@ function calcularLibro() {
       </div>
     </section>` : ""}
     ${listaAvisos(t.plan?.avisos)}
-    ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver las firmas" : "Sube el interior para ver las firmas")}`;
+    ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver las firmas" : "Sube el interior para ver las firmas", true)}`;
+  const carasLb = t.plan?.plan?.caras;
+  if (carasLb?.length) pedirMiniaturas(t, carasLb[Math.min(t.cara, carasLb.length - 1)].ubicaciones.map((u) => u.pagina), calcularLibro);
   if (!pintar(caja, html)) return;
   conectarPaginador(caja, t, calcularLibro);
   $("#lb-a-portada")?.addEventListener("click", () => {
