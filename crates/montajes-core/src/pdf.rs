@@ -1,0 +1,564 @@
+//! Lectura del PDF del cliente y escritura del PDF impuesto.
+//!
+//! Las páginas originales nunca se rasterizan: cada una se convierte en un
+//! *Form XObject* y se dibuja en el pliego con una matriz de transformación,
+//! así la salida conserva vectores, fuentes, transparencias y perfiles.
+
+use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat, dictionary};
+
+use crate::catalogo::VersionPdfx;
+use crate::geometria::Tamano;
+use crate::imposicion::Cara;
+use crate::imposicion::marcas::Marcas;
+use crate::unidades::{mm_a_pt, pt_a_mm};
+use crate::{Error, Resultado};
+
+/// Límite de descompresión por página (protege de PDFs maliciosos).
+const LIMITE_CONTENIDO: usize = 512 * 1024 * 1024;
+
+/// Caja PDF normalizada en puntos.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Caja {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+}
+
+impl Caja {
+    pub fn ancho(&self) -> f64 {
+        self.x1 - self.x0
+    }
+
+    pub fn alto(&self) -> f64 {
+        self.y1 - self.y0
+    }
+
+    fn interseccion(&self, otra: &Caja) -> Caja {
+        Caja { x0: self.x0.max(otra.x0), y0: self.y0.max(otra.y0), x1: self.x1.min(otra.x1), y1: self.y1.min(otra.y1) }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaginaFuente {
+    pub id: ObjectId,
+    pub media: Caja,
+    /// TrimBox (o CropBox/MediaBox si no está definida).
+    pub corte: Caja,
+    /// Hasta dónde llega el contenido utilizable como rebase.
+    pub sangrado: Caja,
+    /// /Rotate normalizado a 0, 90, 180 o 270.
+    pub giro: u16,
+    /// Si la página declaraba TrimBox explícita.
+    pub tiene_trimbox: bool,
+}
+
+impl PaginaFuente {
+    /// Formato final tal como se ve la página (con /Rotate aplicado), en mm.
+    pub fn tamano_corte(&self) -> Tamano {
+        let t = Tamano::new(pt_a_mm(self.corte.ancho()), pt_a_mm(self.corte.alto())).redondeado();
+        if self.giro % 180 == 90 { t.girado() } else { t }
+    }
+
+    /// Rebase disponible (el menor de los cuatro lados), en mm.
+    pub fn rebase_disponible(&self) -> f64 {
+        let c = &self.corte;
+        let s = &self.sangrado;
+        pt_a_mm((c.x0 - s.x0).min(c.y0 - s.y0).min(s.x1 - c.x1).min(s.y1 - c.y1).max(0.0))
+    }
+}
+
+/// PDF de entrada ya analizado.
+pub struct Fuente {
+    doc: Document,
+    pub paginas: Vec<PaginaFuente>,
+}
+
+impl Fuente {
+    pub fn abrir(ruta: &Path) -> Resultado<Self> {
+        Self::desde_documento(Document::load(ruta)?)
+    }
+
+    pub fn desde_bytes(bytes: &[u8]) -> Resultado<Self> {
+        Self::desde_documento(Document::load_mem(bytes)?)
+    }
+
+    pub fn desde_documento(doc: Document) -> Resultado<Self> {
+        if doc.is_encrypted() {
+            return Err(Error::Invalido("el PDF está protegido con contraseña".into()));
+        }
+        let mut paginas = Vec::new();
+        for (_, id) in doc.get_pages() {
+            let media = heredado(&doc, id, b"MediaBox")
+                .and_then(|o| caja(&doc, &o))
+                .ok_or_else(|| Error::Invalido("página sin MediaBox".into()))?;
+            let recorte =
+                heredado(&doc, id, b"CropBox").and_then(|o| caja(&doc, &o)).map_or(media, |c| c.interseccion(&media));
+            let propia = |clave: &[u8]| {
+                doc.get_dictionary(id).ok()?.get(clave).ok().and_then(|o| caja(&doc, o)).map(|c| c.interseccion(&media))
+            };
+            let trim = propia(b"TrimBox");
+            let corte = trim.or_else(|| propia(b"ArtBox")).unwrap_or(recorte);
+            let sangrado = propia(b"BleedBox").unwrap_or(recorte);
+            let giro = heredado(&doc, id, b"Rotate")
+                .and_then(|o| resolver(&doc, &o).as_i64().ok())
+                .map_or(0, |r| r.rem_euclid(360) as u16 / 90 * 90);
+            paginas.push(PaginaFuente { id, media, corte, sangrado, giro, tiene_trimbox: trim.is_some() });
+        }
+        if paginas.is_empty() {
+            return Err(Error::Invalido("el PDF no tiene páginas".into()));
+        }
+        Ok(Self { doc, paginas })
+    }
+}
+
+fn resolver<'a>(doc: &'a Document, o: &'a Object) -> &'a Object {
+    match o {
+        Object::Reference(id) => doc.get_object(*id).unwrap_or(o),
+        _ => o,
+    }
+}
+
+/// Atributo de página heredable (MediaBox, CropBox, Rotate, Resources).
+fn heredado(doc: &Document, pagina: ObjectId, clave: &[u8]) -> Option<Object> {
+    let mut actual = doc.get_dictionary(pagina).ok()?;
+    for _ in 0..64 {
+        if let Ok(valor) = actual.get(clave) {
+            return Some(valor.clone());
+        }
+        let padre = actual.get(b"Parent").ok()?.as_reference().ok()?;
+        actual = doc.get_dictionary(padre).ok()?;
+    }
+    None
+}
+
+fn caja(doc: &Document, o: &Object) -> Option<Caja> {
+    let v = resolver(doc, o).as_array().ok()?;
+    if v.len() != 4 {
+        return None;
+    }
+    let n: Vec<f64> = v.iter().map(|x| resolver(doc, x).as_float().map(f64::from)).collect::<Result<_, _>>().ok()?;
+    Some(Caja { x0: n[0].min(n[2]), y0: n[1].min(n[3]), x1: n[0].max(n[2]), y1: n[1].max(n[3]) })
+}
+
+/// Matriz `cm` que lleva la caja `b` de la página, girada `giro` grados en
+/// sentido horario, a la esquina inferior izquierda `(tx, ty)` del pliego.
+pub fn matriz_colocacion(b: &Caja, giro: u16, tx: f64, ty: f64) -> [f64; 6] {
+    match giro % 360 {
+        0 => [1.0, 0.0, 0.0, 1.0, tx - b.x0, ty - b.y0],
+        90 => [0.0, -1.0, 1.0, 0.0, tx - b.y0, ty + b.x1],
+        180 => [-1.0, 0.0, 0.0, -1.0, tx + b.x1, ty + b.y1],
+        270 => [0.0, 1.0, -1.0, 0.0, tx + b.y1, ty - b.x0],
+        otro => panic!("giro no válido: {otro}"),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpcionesSalida {
+    pub titulo: String,
+    pub pdfx: VersionPdfx,
+    /// Perfil ICC de salida (CMYK) para el OutputIntent.
+    pub icc: Option<Vec<u8>>,
+    /// Identificador de la condición, p. ej. `FOGRA39`.
+    pub condicion: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InformeSalida {
+    /// Se escribió la identificación PDF/X (hay OutputIntent).
+    pub pdfx_identificado: bool,
+    pub pliegos: usize,
+    pub avisos: Vec<String>,
+}
+
+/// Número con pocos decimales para el flujo de contenido.
+fn n(v: f64) -> String {
+    let s = format!("{v:.4}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.into() }
+}
+
+/// Escribe el PDF impuesto en `destino`.
+pub fn escribir(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida, destino: &Path) -> Resultado<InformeSalida> {
+    let (mut doc, informe) = componer(fuente, caras, opciones)?;
+    doc.save(destino)?;
+    Ok(informe)
+}
+
+/// Arma el documento impuesto en memoria.
+pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Resultado<(Document, InformeSalida)> {
+    let Fuente { mut doc, paginas } = fuente;
+    let mut informe = InformeSalida { pliegos: caras.len(), ..Default::default() };
+    if opciones.pdfx == VersionPdfx::X1a {
+        informe.avisos.push("PDF/X-1a: aún no se aplana la transparencia; se escribe como PDF 1.6".into());
+    }
+
+    // 1. Un Form XObject por cada página de entrada que se usa.
+    let mut formas: BTreeMap<usize, ObjectId> = BTreeMap::new();
+    for cara in caras {
+        for u in &cara.ubicaciones {
+            if formas.contains_key(&u.pagina) {
+                continue;
+            }
+            let p = paginas
+                .get(u.pagina)
+                .ok_or_else(|| Error::Invalido(format!("la página {} no existe en la entrada", u.pagina + 1)))?;
+            let id = crear_forma(&mut doc, p)?;
+            formas.insert(u.pagina, id);
+        }
+    }
+
+    // 2. Espacio de color de registro: separación «All» (sale en todas las planchas).
+    let funcion = doc.add_object(dictionary! {
+        "FunctionType" => 2,
+        "Domain" => vec![0.into(), 1.into()],
+        "C0" => vec![0.into(), 0.into(), 0.into(), 0.into()],
+        "C1" => vec![1.into(), 1.into(), 1.into(), 1.into()],
+        "N" => 1,
+    });
+    let registro = doc.add_object(vec![
+        Object::Name(b"Separation".to_vec()),
+        Object::Name(b"All".to_vec()),
+        Object::Name(b"DeviceCMYK".to_vec()),
+        Object::Reference(funcion),
+    ]);
+
+    // 3. Un pliego por cara.
+    let arbol = doc.new_object_id();
+    let mut hijos = Vec::with_capacity(caras.len());
+    for cara in caras {
+        let mut xobjetos = Dictionary::new();
+        let mut contenido = String::new();
+        for u in &cara.ubicaciones {
+            let p = &paginas[u.pagina];
+            let nombre = format!("P{}", u.pagina + 1);
+            xobjetos.set(nombre.as_bytes(), Object::Reference(formas[&u.pagina]));
+            let giro = (p.giro + u.giro) % 360;
+            let m = matriz_colocacion(&p.corte, giro, mm_a_pt(u.corte.x), mm_a_pt(u.corte.y));
+            let r = u.recorte;
+            contenido.push_str(&format!(
+                "q {} {} {} {} re W n {} {} {} {} {} {} cm /{} Do Q\n",
+                n(mm_a_pt(r.x)),
+                n(mm_a_pt(r.y)),
+                n(mm_a_pt(r.ancho)),
+                n(mm_a_pt(r.alto)),
+                n(m[0]),
+                n(m[1]),
+                n(m[2]),
+                n(m[3]),
+                n(m[4]),
+                n(m[5]),
+                nombre
+            ));
+        }
+        dibujar_marcas(&cara.marcas, &mut contenido);
+        informe.avisos.extend(cara.marcas.avisos.iter().map(|a| format!("{}: {a}", cara.nombre)));
+
+        let flujo = doc.add_object(Stream::new(Dictionary::new(), contenido.into_bytes()));
+        let caja_pliego: Object =
+            vec![0.into(), 0.into(), mm_a_pt(cara.pliego.ancho).into(), mm_a_pt(cara.pliego.alto).into()].into();
+        let pagina = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => arbol,
+            "MediaBox" => caja_pliego.clone(),
+            "TrimBox" => caja_pliego.clone(),
+            "BleedBox" => caja_pliego,
+            "Contents" => flujo,
+            "Resources" => dictionary! {
+                "XObject" => xobjetos,
+                "ColorSpace" => dictionary! { "Registro" => registro },
+            },
+        });
+        hijos.push(Object::Reference(pagina));
+    }
+    let cantidad = hijos.len() as i64;
+    doc.objects
+        .insert(arbol, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => hijos, "Count" => cantidad }));
+
+    // 4. Catálogo nuevo: solo lo que sigue siendo válido tras la imposición.
+    let catalogo_viejo = doc.catalog()?.clone();
+    let mut catalogo = dictionary! { "Type" => "Catalog", "Pages" => arbol };
+    let intencion_previa = catalogo_viejo.get(b"OutputIntents").ok().cloned();
+    if let Some(icc) = &opciones.icc {
+        let condicion = opciones.condicion.clone().unwrap_or_else(|| "Custom".into());
+        let perfil = doc.add_object(Stream::new(dictionary! { "N" => 4 }, icc.clone()));
+        let intencion = doc.add_object(dictionary! {
+            "Type" => "OutputIntent",
+            "S" => "GTS_PDFX",
+            "OutputConditionIdentifier" => Object::string_literal(condicion.clone()),
+            "Info" => Object::string_literal(condicion),
+            "DestOutputProfile" => perfil,
+        });
+        catalogo.set("OutputIntents", vec![Object::Reference(intencion)]);
+        informe.pdfx_identificado = true;
+    } else if let Some(previa) = intencion_previa {
+        catalogo.set("OutputIntents", previa);
+        informe.pdfx_identificado = true;
+        informe.avisos.push("se conservó el OutputIntent del PDF de entrada".into());
+    } else {
+        informe.avisos.push("sin perfil ICC de salida: el PDF no se identifica como PDF/X".into());
+    }
+    if let Ok(oc) = catalogo_viejo.get(b"OCProperties") {
+        catalogo.set("OCProperties", oc.clone());
+    }
+
+    let ahora = Fecha::ahora();
+    let version_pdfx = match opciones.pdfx {
+        VersionPdfx::X4 => "PDF/X-4",
+        VersionPdfx::X1a => "PDF/X-1a:2003",
+    };
+    let id_documento = huella(&(opciones.titulo.as_str(), ahora.segundos, caras.len()));
+    let xmp = xmp(&opciones.titulo, &ahora, informe.pdfx_identificado.then_some(version_pdfx), &id_documento);
+    let mut flujo_xmp = Stream::new(dictionary! { "Type" => "Metadata", "Subtype" => "XML" }, xmp.into_bytes());
+    flujo_xmp.allows_compression = false;
+    catalogo.set("Metadata", doc.add_object(flujo_xmp));
+    let id_catalogo = doc.add_object(catalogo);
+
+    let mut info = dictionary! {
+        "Title" => Object::string_literal(opciones.titulo.clone()),
+        "Creator" => Object::string_literal("Montajes"),
+        "Producer" => Object::string_literal(concat!("montajes-core ", env!("CARGO_PKG_VERSION"))),
+        "CreationDate" => Object::string_literal(ahora.pdf()),
+        "ModDate" => Object::string_literal(ahora.pdf()),
+        "Trapped" => "False",
+    };
+    if informe.pdfx_identificado {
+        info.set("GTS_PDFXVersion", Object::string_literal(version_pdfx));
+    }
+    let id_info = doc.add_object(info);
+
+    let id_bytes = hex_a_bytes(&id_documento);
+    doc.trailer = dictionary! {
+        "Root" => id_catalogo,
+        "Info" => id_info,
+        "ID" => vec![
+            Object::String(id_bytes.clone(), StringFormat::Hexadecimal),
+            Object::String(id_bytes, StringFormat::Hexadecimal),
+        ],
+    };
+    doc.version = "1.6".into();
+
+    // 5. Eliminar páginas originales, marcadores y todo lo que quedó suelto.
+    doc.prune_objects();
+    doc.renumber_objects();
+    doc.compress();
+    Ok((doc, informe))
+}
+
+fn crear_forma(doc: &mut Document, p: &PaginaFuente) -> Resultado<ObjectId> {
+    let contenido = doc.get_page_content_with_limit(p.id, LIMITE_CONTENIDO)?;
+    let recursos = heredado(doc, p.id, b"Resources").unwrap_or_else(|| Object::Dictionary(Dictionary::new()));
+    let mut dict = dictionary! {
+        "Type" => "XObject",
+        "Subtype" => "Form",
+        "BBox" => vec![p.media.x0.into(), p.media.y0.into(), p.media.x1.into(), p.media.y1.into()],
+        "Resources" => recursos,
+    };
+    // El grupo de transparencia de la página debe acompañar a la forma.
+    if let Ok(grupo) = doc.get_dictionary(p.id).and_then(|d| d.get(b"Group")) {
+        dict.set("Group", grupo.clone());
+    }
+    Ok(doc.add_object(Stream::new(dict, contenido)))
+}
+
+fn dibujar_marcas(m: &Marcas, s: &mut String) {
+    if !m.tira_color.is_empty() {
+        s.push_str("q\n");
+        for p in &m.tira_color {
+            s.push_str(&format!(
+                "{} {} {} {} k {} {} {} {} re f\n",
+                n(p.cmyk[0]),
+                n(p.cmyk[1]),
+                n(p.cmyk[2]),
+                n(p.cmyk[3]),
+                n(mm_a_pt(p.rect.x)),
+                n(mm_a_pt(p.rect.y)),
+                n(mm_a_pt(p.rect.ancho)),
+                n(mm_a_pt(p.rect.alto))
+            ));
+        }
+        s.push_str("Q\n");
+    }
+    if m.corte.is_empty() && m.registro.is_empty() {
+        return;
+    }
+    // Trazo de 0,25 pt en color de registro.
+    s.push_str("q /Registro CS 1 SCN /Registro cs 1 scn 0.25 w 0 J\n");
+    for l in &m.corte {
+        s.push_str(&format!(
+            "{} {} m {} {} l S\n",
+            n(mm_a_pt(l.x1)),
+            n(mm_a_pt(l.y1)),
+            n(mm_a_pt(l.x2)),
+            n(mm_a_pt(l.y2))
+        ));
+    }
+    for r in &m.registro {
+        let (x, y, radio) = (mm_a_pt(r.x), mm_a_pt(r.y), mm_a_pt(r.radio));
+        // Cruz que sobresale del círculo, círculo y punto central.
+        s.push_str(&format!("{} {} m {} {} l S\n", n(x - radio), n(y), n(x + radio), n(y)));
+        s.push_str(&format!("{} {} m {} {} l S\n", n(x), n(y - radio), n(x), n(y + radio)));
+        circulo(s, x, y, radio * 0.6);
+        s.push_str("S\n");
+        circulo(s, x, y, radio * 0.25);
+        s.push_str("f\n");
+    }
+    s.push_str("Q\n");
+}
+
+/// Círculo con cuatro curvas de Bézier.
+fn circulo(s: &mut String, x: f64, y: f64, r: f64) {
+    let k = 0.552_284_75 * r;
+    s.push_str(&format!("{} {} m\n", n(x + r), n(y)));
+    s.push_str(&format!("{} {} {} {} {} {} c\n", n(x + r), n(y + k), n(x + k), n(y + r), n(x), n(y + r)));
+    s.push_str(&format!("{} {} {} {} {} {} c\n", n(x - k), n(y + r), n(x - r), n(y + k), n(x - r), n(y)));
+    s.push_str(&format!("{} {} {} {} {} {} c\n", n(x - r), n(y - k), n(x - k), n(y - r), n(x), n(y - r)));
+    s.push_str(&format!("{} {} {} {} {} {} c\n", n(x + k), n(y - r), n(x + r), n(y - k), n(x + r), n(y)));
+}
+
+/// Fecha UTC sin dependencias externas.
+struct Fecha {
+    segundos: u64,
+    anio: i64,
+    mes: u32,
+    dia: u32,
+    hora: u32,
+    minuto: u32,
+    segundo: u32,
+}
+
+impl Fecha {
+    fn ahora() -> Self {
+        let segundos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        // Algoritmo de días civiles de Howard Hinnant.
+        let dias = (segundos / 86_400) as i64 + 719_468;
+        let era = dias.div_euclid(146_097);
+        let doe = dias - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let dia = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let mes = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        let anio = yoe + era * 400 + i64::from(mes <= 2);
+        let resto = segundos % 86_400;
+        Self {
+            segundos,
+            anio,
+            mes,
+            dia,
+            hora: (resto / 3600) as u32,
+            minuto: (resto % 3600 / 60) as u32,
+            segundo: (resto % 60) as u32,
+        }
+    }
+
+    fn pdf(&self) -> String {
+        format!(
+            "D:{:04}{:02}{:02}{:02}{:02}{:02}Z",
+            self.anio, self.mes, self.dia, self.hora, self.minuto, self.segundo
+        )
+    }
+
+    fn iso(&self) -> String {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            self.anio, self.mes, self.dia, self.hora, self.minuto, self.segundo
+        )
+    }
+}
+
+fn huella<T: Hash>(valor: &T) -> String {
+    let mut a = DefaultHasher::new();
+    valor.hash(&mut a);
+    let mut b = DefaultHasher::new();
+    (valor, "montajes").hash(&mut b);
+    format!("{:016x}{:016x}", a.finish(), b.finish())
+}
+
+fn hex_a_bytes(hex: &str) -> Vec<u8> {
+    (0..hex.len()).step_by(2).filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok()).collect()
+}
+
+fn escapar_xml(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn xmp(titulo: &str, fecha: &Fecha, pdfx: Option<&str>, id: &str) -> String {
+    let uuid = format!("{}-{}-{}-{}-{}", &id[0..8], &id[8..12], &id[12..16], &id[16..20], &id[20..32]);
+    let pdfx = pdfx.map(|v| format!("\n   <pdfxid:GTS_PDFXVersion>{v}</pdfxid:GTS_PDFXVersion>")).unwrap_or_default();
+    format!(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+    xmlns:pdf="http://ns.adobe.com/pdf/1.3/"
+    xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"
+    xmlns:pdfxid="http://www.npes.org/pdfx/ns/id/">
+   <dc:format>application/pdf</dc:format>
+   <dc:title><rdf:Alt><rdf:li xml:lang="x-default">{titulo}</rdf:li></rdf:Alt></dc:title>
+   <xmp:CreatorTool>Montajes</xmp:CreatorTool>
+   <xmp:CreateDate>{fecha}</xmp:CreateDate>
+   <xmp:ModifyDate>{fecha}</xmp:ModifyDate>
+   <xmp:MetadataDate>{fecha}</xmp:MetadataDate>
+   <pdf:Producer>montajes-core {version}</pdf:Producer>
+   <pdf:Trapped>False</pdf:Trapped>
+   <xmpMM:DocumentID>uuid:{uuid}</xmpMM:DocumentID>
+   <xmpMM:InstanceID>uuid:{uuid}</xmpMM:InstanceID>
+   <xmpMM:VersionID>1</xmpMM:VersionID>
+   <xmpMM:RenditionClass>default</xmpMM:RenditionClass>{pdfx}
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#,
+        titulo = escapar_xml(titulo),
+        fecha = fecha.iso(),
+        version = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+#[cfg(test)]
+mod pruebas {
+    use super::*;
+
+    /// Aplica la matriz a un punto.
+    fn aplicar(m: &[f64; 6], x: f64, y: f64) -> (f64, f64) {
+        (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+    }
+
+    #[test]
+    fn la_matriz_lleva_la_caja_al_destino_en_cada_giro() {
+        let b = Caja { x0: 10.0, y0: 20.0, x1: 110.0, y1: 70.0 }; // 100 × 50
+        for giro in [0, 90, 180, 270] {
+            let m = matriz_colocacion(&b, giro, 300.0, 400.0);
+            let esquinas = [(b.x0, b.y0), (b.x1, b.y0), (b.x0, b.y1), (b.x1, b.y1)].map(|(x, y)| aplicar(&m, x, y));
+            let min_x = esquinas.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+            let min_y = esquinas.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+            let max_x = esquinas.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+            let max_y = esquinas.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+            let (w, h) = if giro % 180 == 0 { (100.0, 50.0) } else { (50.0, 100.0) };
+            assert_eq!((min_x, min_y, max_x - min_x, max_y - min_y), (300.0, 400.0, w, h), "giro {giro}");
+        }
+    }
+
+    #[test]
+    fn giro_horario() {
+        // Con 90° horario, la esquina superior izquierda pasa a la superior derecha.
+        let b = Caja { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 };
+        let m = matriz_colocacion(&b, 90, 0.0, 0.0);
+        assert_eq!(aplicar(&m, 0.0, 50.0), (50.0, 100.0));
+    }
+
+    #[test]
+    fn numeros_compactos() {
+        assert_eq!(n(1.0), "1");
+        assert_eq!(n(2.83466), "2.8347");
+        assert_eq!(n(-0.00001), "0");
+    }
+}

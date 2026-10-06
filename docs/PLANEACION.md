@@ -187,29 +187,48 @@ Trabajo
 
 ## 6. Diseño de interfaz
 
-**Referencia visual**: [dormi, Sleep App for Students (Behance)](https://www.behance.net/gallery/232445089/dormi-Sleep-App-for-Students).
+**Referencia visual**: [dormi, Sleep App for Students (Behance)](https://www.behance.net/gallery/232445089/dormi-Sleep-App-for-Students), a partir de las capturas que compartió el usuario.
 
-> ⚠️ Behance bloqueó la descarga automática, así que no pude ver la referencia directamente. Lo de abajo es una interpretación provisional del estilo propio de este tipo de apps: un tema oscuro y calmado, con tarjetas redondeadas y acentos suaves. **Pendiente**: compartir capturas o la paleta exacta para ajustarlo.
+### 6.1 Lo que tomamos de dormi
+| Elemento de dormi | Cómo se traduce a Montajes |
+|---|---|
+| Fondo blanco hueso, mucho aire, tarjetas grandes muy redondeadas | Lienzo claro; el pliego es la tarjeta protagonista y los paneles flotan en tarjetas de 24–28 px de radio |
+| **Orbes de degradado difuminado** (azul → amarillo → naranja) | Estado "calculando/listo" del montaje, portada de cada trabajo y barra de progreso de la cola. Es la firma visual de la marca |
+| Tarjetas negras con texto blanco grande | Tarjeta de resultado ("27 piezas por pliego · 85 % aprovechamiento") y acciones primarias |
+| Barra de navegación negra en forma de píldora, con la pestaña activa en una píldora blanca | Navegación principal: Inicio · Trabajos · Montaje · Catálogos · Ajustes |
+| Números enormes (6:30, 72 %) | Métricas clave: piezas por pliego, lomo en mm, aprovechamiento %, pliegos totales |
+| Resaltado lavanda detrás de frases clave | Explicación de cada decisión automática ("elegí **girar 90°** porque caben 2 más") |
+| Formas tipo estrella/flor/cuadro redondeado | Íconos de tipo de producto (volante, tarjeta, revista, libro, planta) |
+| Gráficas de barras apiladas azul/amarillo/naranja | Reporte de consumo de papel, planchas y desperdicio por trabajo |
+| Botones en píldora negra ("Continue") y casillas con check naranja | Asistente de 3 pasos y lista de preflight con "corregir" |
 
-**Lenguaje visual propuesto**
-- Tema oscuro por defecto (azul noche/índigo profundo), con un tema claro disponible.
-- Acentos lavanda y violeta suaves, y un color de estado (verde menta = listo, ámbar = advertencia, coral = error).
-- Tarjetas con esquinas muy redondeadas (16–24 px), sombras difusas y degradados sutiles.
-- Tipografía sans geométrica y amable (p. ej. *Plus Jakarta Sans*, *Manrope* o *DM Sans*), con números tabulares en las medidas.
-- Ilustraciones y microanimaciones suaves (el pliego que "se dobla" al calcular).
-- El pliego siempre es el protagonista: un lienzo grande, con controles en tarjetas flotantes.
+### 6.2 Tokens de diseño
+| Token | Valor | Uso |
+|---|---|---|
+| `--fondo` | `#F4F3EF` | Fondo general (blanco hueso) |
+| `--superficie` | `#FFFFFF` | Tarjetas |
+| `--tinta` | `#111111` | Texto, tarjetas oscuras, barra de navegación |
+| `--azul` | `#4C9EF3` | Color principal, "Trustworthy blue" de dormi |
+| `--naranja` | `#FF6B2C` | Acción, advertencias suaves, check activo |
+| `--lima` | `#E4EA5B` | Destacados, estado "listo para imprimir" |
+| `--lavanda` | `#8B8CF0` | Resaltado de texto, selección |
+| `--gris` | `#8A8A86` | Texto secundario |
+| Degradado de marca | `radial(#4C9EF3) → #E4EA5B → #FF6B2C`, con desenfoque de 40–60 px | Orbes |
 
-**Pantallas principales**
-1. **Inicio**: "¿Qué vas a imprimir hoy?", con tarjetas grandes por producto, trabajos recientes y la cola.
-2. **Asistente** (3 pasos): subir el PDF → elegir producto, papel y máquina → ver el resultado.
-3. **Preflight**: una lista de hallazgos con miniatura y un botón "corregir" por cada uno.
-4. **Editor de pliego**: el lienzo con zoom, capas (páginas, marcas, tiras) y un panel con el cálculo explicado.
-5. **Vista de libro**: páginas enfrentadas, lomo calculado en vivo y la simulación 3D del plegado y alzado.
-6. **Portada**: tapa, lomo, contratapa y solapas con guías, que se ajustan solas al cambiar las páginas o el papel.
-7. **Exportar**: PDF/X, JDF, reporte; enviar a hot folder o CTP.
-8. **Catálogos**: papeles, máquinas, plegadoras, perfiles de color y presets.
+- Tema oscuro: `--fondo #0E0E10`, tarjetas `#1A1A1D`; los orbes se mantienen.
+- **Tipografía**: sans grotesca compacta para la interfaz y los números (*Inter Tight* o *Manrope*, con cifras tabulares en las medidas) y serif editorial para títulos de sección y textos explicativos (*Instrument Serif* o *Newsreader*), como la "g" del sistema tipográfico de dormi.
+- Radios: 28 px en tarjetas, 999 px en botones y navegación, 12 px en campos.
+- Movimiento: los orbes "respiran" mientras calcula; el pliego se arma pieza a pieza en 300 ms.
 
----
+### 6.3 Pantallas principales
+1. **Inicio**: saludo y "¿Qué vas a imprimir hoy?", tarjetas de producto con su forma, y trabajos recientes con su orbe.
+2. **Asistente** (3 pasos): subir el PDF → elegir producto, máquina y papel → resultado en una tarjeta negra con números grandes.
+3. **Preflight**: lista tipo checklist (como la de hábitos de dormi), con un botón "corregir" en cada hallazgo.
+4. **Editor de pliego**: lienzo grande con zoom, capas (páginas, marcas, tira de color) y un panel con el cálculo explicado y resaltado en lavanda.
+5. **Vista de libro**: páginas enfrentadas, lomo calculado en vivo con número gigante, y simulación 3D del plegado y alzado.
+6. **Portada**: tapa, lomo, contratapa y solapas con guías, que se ajustan solas al cambiar páginas o papel.
+7. **Catálogos**: tarjetas de máquinas (offset, digital, gran formato) y papeles; crear, duplicar y editar.
+8. **Exportar**: PDF/X, JDF y reporte; enviar a hot folder o CTP.
 
 ## 7. Hoja de ruta
 
@@ -238,10 +257,19 @@ Trabajo
 
 ---
 
-## 9. Decisiones pendientes (para el usuario)
-1. **Plataforma**: ¿app de escritorio, web o ambas desde el inicio? (Recomendación: escritorio primero con Tauri; web después, reutilizando el motor WASM.)
-2. **Máquinas reales del taller**: tamaños de pliego, pinza y plegadoras, para los presets iniciales.
-3. **Papeles más usados** (con calibre) para el cálculo de lomo.
-4. **RIP/CTP** con el que trabajan: define la prioridad del JDF.
-5. **Referencia visual**: capturas de dormi para fijar la paleta y la tipografía.
-6. ¿Es un uso interno o un producto comercial (licencias, multiusuario)?
+## 9. Decisiones tomadas
+
+| Tema | Decisión |
+|---|---|
+| Plataforma | **Escritorio primero** (Tauri) con el mismo motor Rust, que luego se compila a WASM para la versión web. El motor también se expone por CLI y API para la automatización. |
+| Máquinas | Hay varias de litografía y digitales. El sistema tiene un **catálogo de máquinas editable**: pliego máx/mín, pinza, cola, laterales, plancha, colores, dúplex y perfil de salida. Se guarda y se reutiliza. |
+| Papeles | Todos los papeles y calibres. Hay un **catálogo de papeles editable** (gramaje, calibre, estucado, fibra, formatos) con una biblioteca inicial de referencia que se ajusta con la ficha de cada proveedor. |
+| RIP/CTP | Cada máquina define su salida: versión PDF/X, perfil ICC y condición (FOGRA39, GRACoL…), y si necesita JDF. |
+| Negocio | Primero para uso del taller, con la puerta abierta a venderlo. Por eso: licencias de dependencias permisivas (sin AGPL), datos en archivos portables, interfaz preparada para varios idiomas y, más adelante, multiusuario y licenciamiento. |
+
+## 10. Estado
+
+- [x] **Fase 0, fundaciones**: workspace Rust, catálogos de máquinas y papeles, lectura de PDF (cajas, giro y rebase), escritura con Form XObjects, OutputIntent y XMP PDF/X-4, y CLI.
+- [x] **Fase 1, primera parte**: n-up con orientación automática, corte compartido o calle, tiro/retiro (lateral y de cabeza), marcas de corte y registro, tira de color, y cálculo de lomo y creep.
+- [ ] Fase 1, pendiente: gang run (diseños distintos en un pliego), cut & stack, numeración, sentido de fibra en la decisión.
+- [ ] Fase 2: revistas a caballete.
