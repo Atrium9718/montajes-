@@ -140,6 +140,7 @@ pub fn cara_tiro(p: &ParametrosNup, d: &Distribucion, pagina: usize) -> Cara {
         pliego: p.pliego,
         ubicaciones,
         marcas: marcas::generar(&d.cortes, p.pliego, &d.area_imprimible, p.rebase, &p.marcas),
+        cajas: None,
     }
 }
 
@@ -171,6 +172,7 @@ pub fn cara_retiro(p: &ParametrosNup, d: &Distribucion, pagina: usize, volteo: V
         nombre: "Retiro".into(),
         pliego: p.pliego,
         marcas: marcas::generar(&cortes, p.pliego, &area, p.rebase, &p.marcas),
+        cajas: None,
         ubicaciones,
     }
 }

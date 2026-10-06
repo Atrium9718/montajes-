@@ -14,7 +14,8 @@ use montajes_core::imposicion::marcas::OpcionesMarcas;
 use montajes_core::imposicion::nup::{self, Orientacion, ParametrosNup};
 use montajes_core::imposicion::{Margenes, Volteo};
 use montajes_core::libro;
-use montajes_core::pdf::{self, Fuente, OpcionesSalida};
+use montajes_core::pdf::{self, Fuente, OpcionesSalida, mm_es};
+use montajes_core::portada::{self, ParametrosPortada, Portada, TipoPanel, TipoPortada};
 
 #[derive(Parser)]
 #[command(
@@ -46,6 +47,9 @@ enum Comando {
     Nup(ArgsNup),
     /// Libros y revistas por firmas: caballete, al lomo o cosido.
     Libro(ArgsLibro),
+    /// Portada con lomo calculado: plantilla, armado y verificación.
+    #[command(subcommand)]
+    Portada(ComandoPortada),
 }
 
 #[derive(Subcommand)]
@@ -298,6 +302,94 @@ struct ArgsLibro {
     simular: bool,
 }
 
+#[derive(Subcommand)]
+enum ComandoPortada {
+    /// PDF con las guías para que el diseñador arme la portada.
+    Plantilla {
+        #[command(flatten)]
+        dim: ArgsDimPortada,
+        #[arg(short, long)]
+        salida: PathBuf,
+    },
+    /// Arma la portada con páginas sueltas (tapa, contratapa, lomo, solapas)
+    /// o valida y prepara una portada diseñada en una sola página.
+    Armar {
+        /// PDF con las páginas de la portada.
+        entrada: PathBuf,
+        #[arg(short, long)]
+        salida: PathBuf,
+        #[command(flatten)]
+        dim: ArgsDimPortada,
+        /// Qué es cada página, en orden: tapa, contratapa, lomo, solapa-tapa, solapa-contratapa.
+        #[arg(long, value_delimiter = ',', default_value = "tapa,contratapa,lomo,solapa-tapa,solapa-contratapa")]
+        orden: Vec<PanelArg>,
+        /// Máquina cuyo perfil de salida (PDF/X, ICC) se usa.
+        #[arg(short, long)]
+        maquina: Option<String>,
+        #[arg(long)]
+        sin_marcas: bool,
+    },
+    /// Comprueba que una portada en una sola página tenga la medida correcta.
+    Verificar {
+        entrada: PathBuf,
+        #[command(flatten)]
+        dim: ArgsDimPortada,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum PanelArg {
+    Tapa,
+    Contratapa,
+    Lomo,
+    SolapaTapa,
+    SolapaContratapa,
+}
+
+#[derive(Args)]
+struct ArgsDimPortada {
+    /// PDF de la tripa: de ahí se toman el formato y las páginas.
+    #[arg(long)]
+    tripa: Option<PathBuf>,
+    /// Formato final del libro en mm (si no se da --tripa).
+    #[arg(long, value_parser = parse_tamano)]
+    formato: Option<Tamano>,
+    /// Páginas de la tripa (si no se da --tripa).
+    #[arg(long)]
+    paginas: Option<u32>,
+    /// Papel de la tripa (id del catálogo) para calcular el lomo.
+    #[arg(long)]
+    papel: Option<String>,
+    /// Papel de la portada (rústica): su calibre se suma al lomo.
+    #[arg(long)]
+    papel_portada: Option<String>,
+    /// Lomo en mm; reemplaza el cálculo.
+    #[arg(long)]
+    lomo: Option<f64>,
+    /// Ancho de cada solapa en mm (rústica).
+    #[arg(long, default_value_t = 0.0)]
+    solapa: f64,
+    /// Tapa dura (cartoné).
+    #[arg(long)]
+    tapa_dura: bool,
+    /// Grosor del cartón en mm.
+    #[arg(long, default_value_t = 2.5)]
+    carton: f64,
+    /// Escuadra: cuánto sobresale el cartón del bloque (mm).
+    #[arg(long, default_value_t = 3.0)]
+    escuadra: f64,
+    /// Vuelta del forro sobre el cartón (mm).
+    #[arg(long, default_value_t = 15.0)]
+    vuelta: f64,
+    /// Bisagra entre cartón y lomo (mm).
+    #[arg(long, default_value_t = 8.0)]
+    bisagra: f64,
+    #[arg(long, default_value_t = 3.0)]
+    rebase: f64,
+    #[arg(long)]
+    derecha_a_izquierda: bool,
+}
+
 fn parse_tamano(s: &str) -> Result<Tamano, String> {
     Tamano::parse(s).ok_or_else(|| format!("«{s}» no es un tamaño válido; use ancho×alto en mm, p. ej. 450x320"))
 }
@@ -315,7 +407,17 @@ fn carpeta_datos(cli: &Cli) -> Result<PathBuf> {
     Ok(Path::new(&casa).join(".montajes"))
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match ejecutar() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn ejecutar() -> Result<()> {
     let cli = Cli::parse();
     let datos = carpeta_datos(&cli)?;
     match cli.comando {
@@ -325,6 +427,7 @@ fn main() -> Result<()> {
         Comando::Lomo(a) => lomo(&datos, a),
         Comando::Nup(a) => nup(&datos, a),
         Comando::Libro(a) => libro_cmd(&datos, a),
+        Comando::Portada(c) => portada_cmd(&datos, c),
     }
 }
 
@@ -512,22 +615,22 @@ fn opciones_marcas(sin_marcas: bool, sin_tira_color: bool) -> OpcionesMarcas {
 
 /// Escribe el PDF con la configuración de salida de la máquina e imprime los avisos.
 fn escribir_salida(
-    m: &Maquina,
+    perfil: &PerfilSalida,
     fuente: Fuente,
     caras: &[Cara],
     entrada: &Path,
     salida: &Path,
     mut avisos: Vec<String>,
 ) -> Result<()> {
-    let icc = match &m.salida.perfil_icc {
+    let icc = match &perfil.perfil_icc {
         Some(ruta) => Some(std::fs::read(ruta).with_context(|| format!("no se pudo leer el ICC {}", ruta.display()))?),
         None => None,
     };
     let titulo = entrada.file_stem().map_or_else(|| "Montaje".into(), |s| s.to_string_lossy().into_owned());
-    let opciones = OpcionesSalida { titulo, pdfx: m.salida.pdfx, icc, condicion: m.salida.condicion.clone() };
+    let opciones = OpcionesSalida { titulo, pdfx: perfil.pdfx, icc, condicion: perfil.condicion.clone() };
     let informe = pdf::escribir(fuente, caras, &opciones, salida)?;
     avisos.extend(informe.avisos);
-    if m.salida.jdf {
+    if perfil.jdf {
         avisos.push("esta máquina pide JDF; la exportación JDF llega en la fase 4".into());
     }
     for aviso in &avisos {
@@ -604,7 +707,7 @@ fn nup(datos: &Path, a: ArgsNup) -> Result<()> {
         }
         return Ok(());
     }
-    escribir_salida(&m, fuente, &caras, &a.entrada, &a.salida, avisos)
+    escribir_salida(&m.salida, fuente, &caras, &a.entrada, &a.salida, avisos)
 }
 
 fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
@@ -686,5 +789,157 @@ fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
         }
         return Ok(());
     }
-    escribir_salida(&m, fuente, &plan.caras, &a.entrada, &a.salida, avisos)
+    escribir_salida(&m.salida, fuente, &plan.caras, &a.entrada, &a.salida, avisos)
+}
+
+/// Calcula la portada y una descripción legible de cómo se obtuvo el lomo.
+fn calcular_portada(datos: &Path, d: &ArgsDimPortada) -> Result<(Portada, String)> {
+    let (formato, paginas) = match &d.tripa {
+        Some(ruta) => {
+            let f = Fuente::abrir(ruta).with_context(|| format!("no se pudo abrir {}", ruta.display()))?;
+            let (formato, _) = revisar_paginas(&f, d.formato, 0.0)?;
+            (formato, Some(d.paginas.unwrap_or(f.paginas.len() as u32)))
+        }
+        None => (d.formato.context("indique --tripa o --formato")?, d.paginas),
+    };
+    let (lomo_bloque, nota) = match d.lomo {
+        Some(lomo) => (lomo, format!("lomo indicado {} mm", mm_es(lomo))),
+        None => {
+            let paginas = paginas.context("para calcular el lomo indique --paginas o --tripa (o dé --lomo)")?;
+            let papeles = Catalogo::<Papel>::abrir(datos)?;
+            let tripa = papeles.obtener(d.papel.as_deref().context("para calcular el lomo indique --papel")?)?;
+            let cubierta = match (&d.papel_portada, d.tapa_dura) {
+                (Some(id), false) => Some(papeles.obtener(id)?),
+                _ => None,
+            };
+            // El bloque se completa a número par de páginas (hojas enteras).
+            let c = libro::calcular_lomo(paginas.div_ceil(2) * 2, tripa, cubierta, 0.0)?;
+            let mut nota = format!("{} pp en {}", c.paginas, tripa.nombre);
+            if let Some(p) = cubierta {
+                nota.push_str(&format!(" + portada {}", p.nombre));
+            }
+            (c.lomo_mm, nota)
+        }
+    };
+    let tipo = if d.tapa_dura {
+        TipoPortada::TapaDura { carton: d.carton, escuadra: d.escuadra, vuelta: d.vuelta, bisagra: d.bisagra }
+    } else {
+        TipoPortada::Rustica { solapa: d.solapa }
+    };
+    let c = portada::calcular(&ParametrosPortada {
+        pagina: formato,
+        lomo_bloque,
+        tipo,
+        rebase: d.rebase,
+        derecha_a_izquierda: d.derecha_a_izquierda,
+    })?;
+    Ok((c, nota))
+}
+
+fn imprimir_portada(c: &Portada, nota: &str) {
+    println!(
+        "Portada {} × {} mm (+ {} mm de rebase) — lomo {} mm ({nota})",
+        mm_es(c.tamano.ancho),
+        mm_es(c.tamano.alto),
+        mm_es(c.rebase),
+        mm_es(c.lomo)
+    );
+    let paneles: Vec<String> = c
+        .paneles
+        .iter()
+        .filter(|p| p.rect.alto >= c.tamano.alto - 1e-6 || p.tipo != TipoPanel::Vuelta)
+        .map(|p| format!("{} {}", p.tipo.nombre().to_lowercase(), mm_es(p.rect.ancho)))
+        .collect();
+    println!("  {}", paneles.join(" | "));
+}
+
+fn portada_cmd(datos: &Path, c: ComandoPortada) -> Result<()> {
+    match c {
+        ComandoPortada::Plantilla { dim, salida } => {
+            let (c, nota) = calcular_portada(datos, &dim)?;
+            imprimir_portada(&c, &nota);
+            let titulo =
+                format!("Portada {} × {} mm · lomo {} mm", mm_es(c.tamano.ancho), mm_es(c.tamano.alto), mm_es(c.lomo));
+            pdf::plantilla_portada(&c, &titulo, &format!("{nota} · rebase {} mm", mm_es(c.rebase)), &salida)?;
+            println!("✓ {}", salida.display());
+        }
+        ComandoPortada::Verificar { entrada, dim } => {
+            let (c, nota) = calcular_portada(datos, &dim)?;
+            imprimir_portada(&c, &nota);
+            let f = Fuente::abrir(&entrada).with_context(|| format!("no se pudo abrir {}", entrada.display()))?;
+            let t = f.paginas[0].tamano_corte();
+            let (dx, dy) = (t.ancho - c.tamano.ancho, t.alto - c.tamano.alto);
+            println!(
+                "PDF: {} × {} mm, rebase {} mm",
+                mm_es(t.ancho),
+                mm_es(t.alto),
+                mm_es(f.paginas[0].rebase_disponible())
+            );
+            if dx.abs() > 0.5 || dy.abs() > 0.5 {
+                let diferencia = |v: f64, eje: &str| match v {
+                    v if v > 0.5 => format!("le sobran {} mm de {eje}", mm_es(v)),
+                    v if v < -0.5 => format!("le faltan {} mm de {eje}", mm_es(-v)),
+                    _ => format!("el {eje} está bien"),
+                };
+                bail!(
+                    "la portada no coincide: {}, {} (una diferencia de ancho suele ser el lomo)",
+                    diferencia(dx, "ancho"),
+                    diferencia(dy, "alto")
+                );
+            }
+            if f.paginas[0].rebase_disponible() + 0.05 < c.rebase {
+                println!("⚠ el PDF tiene menos rebase del pedido");
+            }
+            println!("✓ la portada tiene la medida correcta");
+        }
+        ComandoPortada::Armar { entrada, salida, dim, orden, maquina, sin_marcas } => {
+            let (c, nota) = calcular_portada(datos, &dim)?;
+            imprimir_portada(&c, &nota);
+            let f = Fuente::abrir(&entrada).with_context(|| format!("no se pudo abrir {}", entrada.display()))?;
+            let marcas = opciones_marcas(sin_marcas, true);
+            let primera = f.paginas[0].tamano_corte();
+            let completa = f.paginas.len() == 1
+                && (primera.ancho - c.tamano.ancho).abs() <= 0.5
+                && (primera.alto - c.tamano.alto).abs() <= 0.5;
+            let cara = if completa {
+                println!("Portada completa en una página: medida correcta.");
+                portada::cara_completa(&c, 0, &marcas)
+            } else {
+                if f.paginas.len() > orden.len() {
+                    bail!("el PDF tiene {} páginas y --orden nombra {}", f.paginas.len(), orden.len());
+                }
+                let asignacion: Vec<(TipoPanel, usize, Tamano)> = f
+                    .paginas
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let tipo = match orden[i] {
+                            PanelArg::Tapa => TipoPanel::Tapa,
+                            PanelArg::Contratapa => TipoPanel::Contratapa,
+                            PanelArg::Lomo => TipoPanel::Lomo,
+                            PanelArg::SolapaTapa => TipoPanel::SolapaTapa,
+                            PanelArg::SolapaContratapa => TipoPanel::SolapaContratapa,
+                        };
+                        (tipo, i, p.tamano_corte())
+                    })
+                    .collect();
+                if dim.tapa_dura {
+                    bail!(
+                        "en tapa dura el forro se diseña en una sola página: use `portada plantilla` y luego `portada armar` con ese PDF"
+                    );
+                }
+                for (tipo, i, _) in &asignacion {
+                    println!("  pág. {} → {}", i + 1, tipo.nombre().to_lowercase());
+                }
+                portada::cara_armada(&c, &asignacion, &marcas)?
+            };
+            let perfil = match maquina {
+                Some(id) => Catalogo::<Maquina>::abrir(datos)?.obtener(&id)?.salida.clone(),
+                None => PerfilSalida::default(),
+            };
+            escribir_salida(&perfil, f, &[cara], &entrada, &salida, Vec::new())?;
+            println!("Para imprimir varias en un pliego: montajes nup {} -s pliego.pdf -m <máquina>", salida.display());
+        }
+    }
+    Ok(())
 }

@@ -10,6 +10,7 @@ pub mod geometria;
 pub mod imposicion;
 pub mod libro;
 pub mod pdf;
+pub mod portada;
 pub mod unidades;
 
 pub use error::{Error, Resultado};

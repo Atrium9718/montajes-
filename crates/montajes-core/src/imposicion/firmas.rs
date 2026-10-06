@@ -358,6 +358,7 @@ fn caras_firma(
             pliego: p.pliego,
             ubicaciones,
             marcas: m,
+            cajas: None,
         }
     })
 }

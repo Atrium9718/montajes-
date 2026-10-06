@@ -32,7 +32,13 @@ montajes libro revista.pdf -s revista-pliegos.pdf -m sm74 -e caballete --papel b
 montajes libro novela.pdf -s novela-pliegos.pdf -m sm74 -e lomo --papel bond75 --fresado 3
 montajes libro manga.pdf -s manga-pliegos.pdf -m sm74 -e cosido --derecha-a-izquierda --firma 16
 
-# 5. Lomo de un libro
+# 5. Portada con lomo automático
+montajes portada plantilla --tripa novela.pdf --papel bond75 --papel-portada brillante300 --solapa 80 -s plantilla.pdf
+montajes portada verificar portada-del-cliente.pdf --tripa novela.pdf --papel bond75 --papel-portada brillante300
+montajes portada armar tapa-y-contratapa.pdf -s portada.pdf --tripa novela.pdf --papel bond75 -m sm74
+montajes portada plantilla --formato 148x210 --paginas 240 --papel bond75 --tapa-dura -s forro.pdf
+
+# 6. Lomo de un libro
 montajes lomo --paginas 240 --papel bond75 --portada brillante300 --tolerancia 0.5
 ```
 

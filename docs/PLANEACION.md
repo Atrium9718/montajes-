@@ -277,4 +277,9 @@ Trabajo
   - Páginas en blanco automáticas, firma girada 90° cuando así cabe, y lectura de derecha a izquierda.
   - Marcas de plegado.
   - Comando `montajes libro`.
-- [ ] Fase 3, pendiente: portada (tapa, lomo, contratapa y solapas), tapa dura, firmas de 12/24 pp, varias firmas iguales por pliego (work & turn de firmas), insertos.
+- [x] **Portada**:
+  - Medidas calculadas a partir de las páginas y el papel: rústica con o sin solapas, y tapa dura (cartón, escuadra, vuelta, bisagra).
+  - Plantilla PDF para el diseñador con guías en una capa que no imprime.
+  - Armado desde páginas sueltas, o verificación de una portada completa.
+  - Comando `montajes portada`.
+- [ ] Fase 3, pendiente: firmas de 12/24 pp, varias firmas iguales por pliego (work & turn de firmas), insertos.

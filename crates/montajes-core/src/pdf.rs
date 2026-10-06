@@ -12,9 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat, dictionary};
 
 use crate::catalogo::VersionPdfx;
-use crate::geometria::Tamano;
+use crate::geometria::{Rect, Tamano};
 use crate::imposicion::Cara;
 use crate::imposicion::marcas::Marcas;
+use crate::portada::{Portada, TipoPanel};
 use crate::unidades::{mm_a_pt, pt_a_mm};
 use crate::{Error, Resultado};
 
@@ -260,14 +261,18 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
         informe.avisos.extend(cara.marcas.avisos.iter().map(|a| format!("{}: {a}", cara.nombre)));
 
         let flujo = doc.add_object(Stream::new(Dictionary::new(), contenido.into_bytes()));
-        let caja_pliego: Object =
-            vec![0.into(), 0.into(), mm_a_pt(cara.pliego.ancho).into(), mm_a_pt(cara.pliego.alto).into()].into();
+        let caja = |r: Rect| -> Object {
+            vec![mm_a_pt(r.x).into(), mm_a_pt(r.y).into(), mm_a_pt(r.derecha()).into(), mm_a_pt(r.arriba()).into()]
+                .into()
+        };
+        let todo = Rect::new(0.0, 0.0, cara.pliego.ancho, cara.pliego.alto);
+        let (corte, sangrado) = cara.cajas.map_or((todo, todo), |c| (c.corte, c.sangrado));
         let pagina = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => arbol,
-            "MediaBox" => caja_pliego.clone(),
-            "TrimBox" => caja_pliego.clone(),
-            "BleedBox" => caja_pliego,
+            "MediaBox" => caja(todo),
+            "TrimBox" => caja(corte),
+            "BleedBox" => caja(sangrado),
             "Contents" => flujo,
             "Resources" => dictionary! {
                 "XObject" => xobjetos,
@@ -348,6 +353,184 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
     doc.renumber_objects();
     doc.compress();
     Ok((doc, informe))
+}
+
+/// Texto para un flujo de contenido con fuente WinAnsi: escapa paréntesis y
+/// convierte a Latin-1 (cubre tildes, ñ y ×).
+fn texto_pdf(s: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(s.len() + 2);
+    v.push(b'(');
+    for c in s.chars() {
+        match c {
+            '(' | ')' | '\\' => {
+                v.push(b'\\');
+                v.push(c as u8);
+            }
+            c if (c as u32) < 256 => v.push(c as u32 as u8),
+            '—' => v.push(0x97),
+            _ => v.push(b'?'),
+        }
+    }
+    v.push(b')');
+    v
+}
+
+/// Milímetros con coma decimal y sin ceros sobrantes: 12,8 / 148.
+pub fn mm_es(v: f64) -> String {
+    n((v * 100.0).round() / 100.0).replace('.', ",")
+}
+
+/// Plantilla de portada para el diseñador: página del tamaño final con
+/// rebase y guías (corte, rebase, pliegues, zona segura, rótulos) en una capa
+/// que se ve en pantalla pero no se imprime.
+pub fn plantilla_portada(c: &Portada, titulo: &str, nota: &str, destino: &Path) -> Resultado<()> {
+    const MARGEN: f64 = 20.0;
+    let r = c.rebase;
+    let ancho = c.tamano.ancho + 2.0 * (r + MARGEN);
+    let alto = c.tamano.alto + 2.0 * (r + MARGEN);
+    let corte = Rect::new(MARGEN + r, MARGEN + r, c.tamano.ancho, c.tamano.alto);
+    let sangrado = corte.expandir(r, r, r, r);
+    let re =
+        |r: Rect| format!("{} {} {} {} re", n(mm_a_pt(r.x)), n(mm_a_pt(r.y)), n(mm_a_pt(r.ancho)), n(mm_a_pt(r.alto)));
+    let linea = |x1: f64, y1: f64, x2: f64, y2: f64| {
+        format!("{} {} m {} {} l S\n", n(mm_a_pt(x1)), n(mm_a_pt(y1)), n(mm_a_pt(x2)), n(mm_a_pt(y2)))
+    };
+
+    let mut s: Vec<u8> = Vec::new();
+    let texto = |s: &mut Vec<u8>, tam: f64, x: f64, y: f64, girado: bool, t: &str| {
+        // Centrado aproximado: Helvetica mide ~0,55 em por carácter.
+        let largo = 0.55 * tam * t.chars().count() as f64;
+        let (x, y) = (mm_a_pt(x), mm_a_pt(y));
+        let matriz = if girado {
+            format!("0 1 -1 0 {} {} Tm", n(x + tam / 3.0), n(y - largo / 2.0))
+        } else {
+            format!("1 0 0 1 {} {} Tm", n(x - largo / 2.0), n(y))
+        };
+        s.extend_from_slice(format!("BT /F1 {} Tf {matriz} ", n(tam)).as_bytes());
+        s.extend(texto_pdf(t));
+        s.extend_from_slice(b" Tj ET\n");
+    };
+    s.extend_from_slice(b"/OC /Guias BDC q\n");
+    // Zona de rebase en gris claro y bordes de rebase (rojo) y corte (cian).
+    s.extend_from_slice(format!("0.93 g {} {} f*\n", re(sangrado), re(corte)).as_bytes());
+    s.extend_from_slice(format!("1 0 0 RG 0.5 w {} S\n", re(sangrado)).as_bytes());
+    s.extend_from_slice(format!("0 0.6 1 RG 0.75 w {} S\n", re(corte)).as_bytes());
+    // Pliegues (magenta discontinuo).
+    s.extend_from_slice(b"1 0 1 RG 0.5 w [4 2] 0 d\n");
+    for &x in &c.pliegues {
+        s.extend_from_slice(linea(corte.x + x, sangrado.y, corte.x + x, sangrado.arriba()).as_bytes());
+    }
+    for &y in &c.pliegues_horizontales {
+        s.extend_from_slice(linea(sangrado.x, corte.y + y, sangrado.derecha(), corte.y + y).as_bytes());
+    }
+    // Zona segura (verde punteado) en los paneles que llevan diseño.
+    s.extend_from_slice(b"0 0.6 0 RG [1 2] 0 d\n");
+    for p in &c.paneles {
+        let seguridad = match p.tipo {
+            TipoPanel::Lomo => 1.5_f64.min(p.rect.ancho / 4.0),
+            TipoPanel::Bisagra | TipoPanel::Vuelta => continue,
+            _ => c.seguridad,
+        };
+        let interior = Rect::new(corte.x + p.rect.x, corte.y + p.rect.y, p.rect.ancho, p.rect.alto).expandir(
+            -seguridad,
+            -c.seguridad,
+            -seguridad,
+            -c.seguridad,
+        );
+        if interior.ancho > 0.0 && interior.alto > 0.0 {
+            s.extend_from_slice(format!("{} S\n", re(interior)).as_bytes());
+        }
+    }
+    s.extend_from_slice(b"[] 0 d 0 g\n");
+    // Rótulos de cada panel con su medida.
+    for p in &c.paneles {
+        // Las vueltas de cabeza y pie se entienden por los pliegues; no se rotulan.
+        if p.tipo == TipoPanel::Vuelta && p.rect.alto < c.tamano.alto - 1e-6 {
+            continue;
+        }
+        let cx = corte.x + p.rect.x + p.rect.ancho / 2.0;
+        let cy = corte.y + p.rect.y + p.rect.alto / 2.0;
+        let medida = format!("{} mm", mm_es(p.rect.ancho));
+        if p.rect.ancho < 30.0 {
+            texto(&mut s, 7.0, cx, cy, true, &format!("{} · {medida}", p.tipo.nombre()));
+        } else {
+            texto(&mut s, 10.0, cx, cy + 2.0, false, p.tipo.nombre());
+            texto(&mut s, 8.0, cx, cy - 4.0, false, &format!("{medida} × {} mm", mm_es(p.rect.alto)));
+        }
+    }
+    // Encabezado y leyenda fuera del área de impresión.
+    texto(&mut s, 11.0, ancho / 2.0, alto - 9.0, false, titulo);
+    texto(&mut s, 8.0, ancho / 2.0, alto - 15.0, false, nota);
+    texto(
+        &mut s,
+        7.0,
+        ancho / 2.0,
+        6.0,
+        false,
+        "Cian: corte · Rojo: rebase · Magenta: pliegues · Verde: zona segura. Las guías no se imprimen.",
+    );
+    s.extend_from_slice(b"Q EMC\n");
+
+    let mut doc = Document::with_version("1.6");
+    let fuente = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+        "Encoding" => "WinAnsiEncoding",
+    });
+    let capa = doc.add_object(dictionary! {
+        "Type" => "OCG",
+        "Name" => Object::string_literal("Guías de portada (no imprime)"),
+        "Usage" => dictionary! {
+            "Print" => dictionary! { "PrintState" => "OFF" },
+            "View" => dictionary! { "ViewState" => "ON" },
+            "Export" => dictionary! { "ExportState" => "OFF" },
+        },
+    });
+    let contenido = doc.add_object(Stream::new(dictionary! {}, s));
+    let arbol = doc.new_object_id();
+    let caja = |r: Rect| -> Object {
+        vec![mm_a_pt(r.x).into(), mm_a_pt(r.y).into(), mm_a_pt(r.derecha()).into(), mm_a_pt(r.arriba()).into()].into()
+    };
+    let pagina = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => arbol,
+        "MediaBox" => caja(Rect::new(0.0, 0.0, ancho, alto)),
+        "TrimBox" => caja(corte),
+        "BleedBox" => caja(sangrado),
+        "Contents" => contenido,
+        "Resources" => dictionary! {
+            "Font" => dictionary! { "F1" => fuente },
+            "Properties" => dictionary! { "Guias" => capa },
+        },
+    });
+    doc.objects.insert(
+        arbol,
+        Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![pagina.into()], "Count" => 1 }),
+    );
+    let catalogo = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => arbol,
+        "OCProperties" => dictionary! {
+            "OCGs" => vec![capa.into()],
+            "D" => dictionary! {
+                "ON" => vec![capa.into()],
+                "AS" => vec![
+                    dictionary! { "Event" => "Print", "OCGs" => vec![capa.into()], "Category" => vec!["Print".into()] }.into(),
+                    dictionary! { "Event" => "View", "OCGs" => vec![capa.into()], "Category" => vec!["View".into()] }.into(),
+                ],
+            },
+        },
+    });
+    let info = doc.add_object(dictionary! {
+        "Title" => Object::string_literal(titulo),
+        "Creator" => Object::string_literal("Montajes"),
+    });
+    doc.trailer.set("Root", catalogo);
+    doc.trailer.set("Info", info);
+    doc.compress();
+    doc.save(destino)?;
+    Ok(())
 }
 
 fn crear_forma(doc: &mut Document, p: &PaginaFuente) -> Resultado<ObjectId> {

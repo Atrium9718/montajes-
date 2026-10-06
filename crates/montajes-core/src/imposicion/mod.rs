@@ -73,4 +73,14 @@ pub struct Cara {
     pub pliego: Tamano,
     pub ubicaciones: Vec<Ubicacion>,
     pub marcas: marcas::Marcas,
+    /// Cajas de corte y rebase propias; sin ellas el pliego entero es el formato.
+    #[serde(default)]
+    pub cajas: Option<Cajas>,
+}
+
+/// TrimBox y BleedBox de una página que no es un pliego de máquina (p. ej. una portada).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Cajas {
+    pub corte: Rect,
+    pub sangrado: Rect,
 }
