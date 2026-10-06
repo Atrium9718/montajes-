@@ -3,8 +3,10 @@
 //! El resultado es geometría pura en milímetros (sin PDF), así se puede
 //! probar, previsualizar en la interfaz y luego escribir con [`crate::pdf`].
 
+pub mod firmas;
 pub mod marcas;
 pub mod nup;
+pub mod plegado;
 
 use serde::{Deserialize, Serialize};
 

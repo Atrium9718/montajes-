@@ -384,7 +384,7 @@ fn dibujar_marcas(m: &Marcas, s: &mut String) {
         }
         s.push_str("Q\n");
     }
-    if m.corte.is_empty() && m.registro.is_empty() {
+    if m.corte.is_empty() && m.registro.is_empty() && m.pliegues.is_empty() && m.alzado.is_empty() {
         return;
     }
     // Trazo de 0,25 pt en color de registro.
@@ -396,6 +396,30 @@ fn dibujar_marcas(m: &Marcas, s: &mut String) {
             n(mm_a_pt(l.y1)),
             n(mm_a_pt(l.x2)),
             n(mm_a_pt(l.y2))
+        ));
+    }
+    // Plegado: línea discontinua.
+    if !m.pliegues.is_empty() {
+        s.push_str("[2 2] 0 d\n");
+        for l in &m.pliegues {
+            s.push_str(&format!(
+                "{} {} m {} {} l S\n",
+                n(mm_a_pt(l.x1)),
+                n(mm_a_pt(l.y1)),
+                n(mm_a_pt(l.x2)),
+                n(mm_a_pt(l.y2))
+            ));
+        }
+        s.push_str("[] 0 d\n");
+    }
+    // Marcas de alzado (escalera en el lomo de cada firma).
+    for r in &m.alzado {
+        s.push_str(&format!(
+            "{} {} {} {} re f\n",
+            n(mm_a_pt(r.x)),
+            n(mm_a_pt(r.y)),
+            n(mm_a_pt(r.ancho)),
+            n(mm_a_pt(r.alto))
         ));
     }
     for r in &m.registro {

@@ -68,6 +68,12 @@ pub struct Marcas {
     pub corte: Vec<Linea>,
     pub registro: Vec<Registro>,
     pub tira_color: Vec<Parche>,
+    /// Marcas de plegado (se dibujan discontinuas).
+    #[serde(default)]
+    pub pliegues: Vec<Linea>,
+    /// Marcas de alzado en el lomo de cada firma.
+    #[serde(default)]
+    pub alzado: Vec<Rect>,
     /// Lo que no se pudo dibujar por falta de espacio.
     pub avisos: Vec<String>,
 }

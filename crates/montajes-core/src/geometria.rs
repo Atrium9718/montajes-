@@ -62,6 +62,32 @@ impl Rect {
         self.y + self.alto
     }
 
+    pub fn interseccion(&self, otro: &Rect) -> Rect {
+        let x = self.x.max(otro.x);
+        let y = self.y.max(otro.y);
+        Rect::new(
+            x,
+            y,
+            (self.derecha().min(otro.derecha()) - x).max(0.0),
+            (self.arriba().min(otro.arriba()) - y).max(0.0),
+        )
+    }
+
+    /// Refleja sobre el eje vertical de un pliego de `ancho` (vista del retiro).
+    pub fn reflejar_x(&self, ancho: f64) -> Rect {
+        Rect::new(ancho - self.derecha(), self.y, self.ancho, self.alto)
+    }
+
+    /// Gira 90° en sentido horario dentro de un pliego de `ancho` (antes del giro).
+    pub fn girar_horario(&self, ancho: f64) -> Rect {
+        Rect::new(self.y, ancho - self.derecha(), self.alto, self.ancho)
+    }
+
+    /// Gira 90° en sentido antihorario dentro de un pliego de `alto` (antes del giro).
+    pub fn girar_antihorario(&self, alto: f64) -> Rect {
+        Rect::new(alto - self.arriba(), self.x, self.alto, self.ancho)
+    }
+
     /// Expande cada lado por separado: (izquierda, abajo, derecha, arriba).
     pub fn expandir(&self, izq: f64, abajo: f64, der: f64, arriba: f64) -> Self {
         Self::new(self.x - izq, self.y - abajo, self.ancho + izq + der, self.alto + abajo + arriba)
@@ -71,6 +97,18 @@ impl Rect {
 #[cfg(test)]
 mod pruebas {
     use super::*;
+
+    #[test]
+    fn giros_inversos() {
+        let r = Rect::new(10.0, 20.0, 30.0, 40.0);
+        // Pliego virtual 200 × 100: el giro horario y el inverso del antihorario coinciden en tamaño.
+        let h = r.girar_horario(200.0);
+        assert_eq!(h, Rect::new(20.0, 160.0, 40.0, 30.0));
+        let a = r.girar_antihorario(100.0);
+        assert_eq!(a, Rect::new(40.0, 10.0, 40.0, 30.0));
+        assert_eq!(r.reflejar_x(200.0).reflejar_x(200.0), r);
+        assert_eq!(r.interseccion(&Rect::new(0.0, 0.0, 25.0, 100.0)), Rect::new(10.0, 20.0, 15.0, 40.0));
+    }
 
     #[test]
     fn parse_tamano() {

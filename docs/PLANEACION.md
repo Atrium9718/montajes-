@@ -272,4 +272,9 @@ Trabajo
 - [x] **Fase 0, fundaciones**: workspace Rust, catálogos de máquinas y papeles, lectura de PDF (cajas, giro y rebase), escritura con Form XObjects, OutputIntent y XMP PDF/X-4, y CLI.
 - [x] **Fase 1, primera parte**: n-up con orientación automática, corte compartido o calle, tiro/retiro (lateral y de cabeza), marcas de corte y registro, tira de color, y cálculo de lomo y creep.
 - [ ] Fase 1, pendiente: gang run (diseños distintos en un pliego), cut & stack, numeración, sentido de fibra en la decisión.
-- [ ] Fase 2: revistas a caballete.
+- [x] **Fase 2 y 3, núcleo de libros**: esquemas de plegado de 4, 8, 16, 32 y 64 pp calculados simulando el doblez (no con tablas), y reparto automático en firmas (la mayor que quepa, el resto en firmas menores). Incluye:
+  - Caballete (firmas anidadas con creep por hoja), al lomo (firmas alzadas, fresado y marcas de alzado en escalera) y cosido.
+  - Páginas en blanco automáticas, firma girada 90° cuando así cabe, y lectura de derecha a izquierda.
+  - Marcas de plegado.
+  - Comando `montajes libro`.
+- [ ] Fase 3, pendiente: portada (tapa, lomo, contratapa y solapas), tapa dura, firmas de 12/24 pp, varias firmas iguales por pliego (work & turn de firmas), insertos.

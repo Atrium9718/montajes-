@@ -8,6 +8,8 @@ use montajes_core::catalogo::{
     Catalogo, Fibra, Maquina, Papel, PerfilSalida, Plancha, TipoMaquina, VersionPdfx, papeles_de_referencia,
 };
 use montajes_core::geometria::Tamano;
+use montajes_core::imposicion::Cara;
+use montajes_core::imposicion::firmas::{self, Encuadernacion, ParametrosLibro};
 use montajes_core::imposicion::marcas::OpcionesMarcas;
 use montajes_core::imposicion::nup::{self, Orientacion, ParametrosNup};
 use montajes_core::imposicion::{Margenes, Volteo};
@@ -42,6 +44,8 @@ enum Comando {
     Lomo(ArgsLomo),
     /// Montaje de piezas repetidas: volantes, tarjetas, etiquetas.
     Nup(ArgsNup),
+    /// Libros y revistas por firmas: caballete, al lomo o cosido.
+    Libro(ArgsLibro),
 }
 
 #[derive(Subcommand)]
@@ -237,6 +241,63 @@ struct ArgsNup {
     simular: bool,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum EncuadernacionArg {
+    /// Grapa: firmas anidadas, con creep.
+    Caballete,
+    /// PUR o hot-melt: firmas alzadas, lomo fresado.
+    Lomo,
+    /// Cosido con hilo: firmas alzadas, sin fresado.
+    Cosido,
+}
+
+#[derive(Args)]
+struct ArgsLibro {
+    /// PDF de la tripa (interior), página por página.
+    entrada: PathBuf,
+    /// PDF de salida.
+    #[arg(short, long)]
+    salida: PathBuf,
+    /// Máquina del catálogo.
+    #[arg(short, long)]
+    maquina: String,
+    #[arg(short, long, value_enum)]
+    encuadernacion: EncuadernacionArg,
+    /// Papel de la tripa (para creep y lomo).
+    #[arg(long)]
+    papel: Option<String>,
+    /// Páginas por firma: 4, 8, 16, 32 o 64 (por defecto la mayor que quepa).
+    #[arg(long)]
+    firma: Option<u32>,
+    /// Pliego en mm (por defecto el máximo de la máquina).
+    #[arg(long, value_parser = parse_tamano)]
+    pliego: Option<Tamano>,
+    /// Formato final en mm (por defecto el TrimBox del PDF).
+    #[arg(long, value_parser = parse_tamano)]
+    formato: Option<Tamano>,
+    #[arg(long, default_value_t = 3.0)]
+    rebase: f64,
+    /// Fresado del lomo en mm (solo al lomo).
+    #[arg(long, default_value_t = 3.0)]
+    fresado: f64,
+    /// Refile en cabeza, pie y frente en mm.
+    #[arg(long, default_value_t = 3.0)]
+    refile: f64,
+    /// No compensar el creep en caballete.
+    #[arg(long)]
+    sin_creep: bool,
+    /// Lectura de derecha a izquierda.
+    #[arg(long)]
+    derecha_a_izquierda: bool,
+    #[arg(long)]
+    sin_marcas: bool,
+    #[arg(long)]
+    sin_tira_color: bool,
+    /// Solo calcular y mostrar el plan, sin escribir el PDF.
+    #[arg(long)]
+    simular: bool,
+}
+
 fn parse_tamano(s: &str) -> Result<Tamano, String> {
     Tamano::parse(s).ok_or_else(|| format!("«{s}» no es un tamaño válido; use ancho×alto en mm, p. ej. 450x320"))
 }
@@ -263,6 +324,7 @@ fn main() -> Result<()> {
         Comando::Info { pdf } => info(&pdf),
         Comando::Lomo(a) => lomo(&datos, a),
         Comando::Nup(a) => nup(&datos, a),
+        Comando::Libro(a) => libro_cmd(&datos, a),
     }
 }
 
@@ -412,43 +474,77 @@ fn lomo(datos: &Path, a: ArgsLomo) -> Result<()> {
     Ok(())
 }
 
-fn nup(datos: &Path, a: ArgsNup) -> Result<()> {
-    let maquinas = Catalogo::<Maquina>::abrir(datos)?;
-    let m = maquinas.obtener(&a.maquina)?.clone();
-    let fuente = Fuente::abrir(&a.entrada).with_context(|| format!("no se pudo abrir {}", a.entrada.display()))?;
-
-    if a.dorso && fuente.paginas.len() % 2 != 0 {
-        bail!("con --dorso el PDF debe tener páginas en pares frente/dorso ({} páginas)", fuente.paginas.len());
-    }
-    let primera = &fuente.paginas[0];
-    let pieza = a.formato.unwrap_or_else(|| primera.tamano_corte());
+/// Verifica que todas las páginas tengan el mismo formato final y suficiente rebase.
+fn revisar_paginas(fuente: &Fuente, formato: Option<Tamano>, rebase: f64) -> Result<(Tamano, Vec<String>)> {
+    let formato = formato.unwrap_or_else(|| fuente.paginas[0].tamano_corte());
     let mut avisos = Vec::new();
     for (i, p) in fuente.paginas.iter().enumerate() {
         let t = p.tamano_corte();
-        if (t.ancho - pieza.ancho).abs() > 0.5 || (t.alto - pieza.alto).abs() > 0.5 {
-            bail!(
-                "la página {} mide {:.1}×{:.1} mm y el formato es {:.1}×{:.1} mm (¿falta TrimBox o el giro?)",
-                i + 1,
-                t.ancho,
-                t.alto,
-                pieza.ancho,
-                pieza.alto
-            );
+        if (t.ancho - formato.ancho).abs() > 0.5 || (t.alto - formato.alto).abs() > 0.5 {
+            bail!("la página {} mide {t} y el formato es {formato} (¿falta TrimBox o el giro?)", i + 1);
         }
-        if p.rebase_disponible() + 0.05 < a.rebase {
+        if p.rebase_disponible() + 0.05 < rebase {
             avisos.push(format!(
-                "página {}: tiene {:.1} mm de rebase y se pidieron {} mm",
+                "página {}: tiene {:.1} mm de rebase y se pidieron {rebase} mm",
                 i + 1,
-                p.rebase_disponible(),
-                a.rebase
+                p.rebase_disponible()
             ));
         }
     }
+    Ok((formato, avisos))
+}
 
-    let pliego = a.pliego.unwrap_or(m.pliego_max);
+fn pliego_de(m: &Maquina, pedido: Option<Tamano>) -> Result<Tamano> {
+    let pliego = pedido.unwrap_or(m.pliego_max);
     if pliego.ancho > m.pliego_max.ancho + 0.01 || pliego.alto > m.pliego_max.alto + 0.01 {
         bail!("el pliego {pliego} excede el máximo de «{}» ({})", m.nombre, m.pliego_max);
     }
+    Ok(pliego)
+}
+
+fn opciones_marcas(sin_marcas: bool, sin_tira_color: bool) -> OpcionesMarcas {
+    let mut marcas = if sin_marcas { OpcionesMarcas::ninguna() } else { OpcionesMarcas::default() };
+    if sin_tira_color {
+        marcas.tira_color = false;
+    }
+    marcas
+}
+
+/// Escribe el PDF con la configuración de salida de la máquina e imprime los avisos.
+fn escribir_salida(
+    m: &Maquina,
+    fuente: Fuente,
+    caras: &[Cara],
+    entrada: &Path,
+    salida: &Path,
+    mut avisos: Vec<String>,
+) -> Result<()> {
+    let icc = match &m.salida.perfil_icc {
+        Some(ruta) => Some(std::fs::read(ruta).with_context(|| format!("no se pudo leer el ICC {}", ruta.display()))?),
+        None => None,
+    };
+    let titulo = entrada.file_stem().map_or_else(|| "Montaje".into(), |s| s.to_string_lossy().into_owned());
+    let opciones = OpcionesSalida { titulo, pdfx: m.salida.pdfx, icc, condicion: m.salida.condicion.clone() };
+    let informe = pdf::escribir(fuente, caras, &opciones, salida)?;
+    avisos.extend(informe.avisos);
+    if m.salida.jdf {
+        avisos.push("esta máquina pide JDF; la exportación JDF llega en la fase 4".into());
+    }
+    for aviso in &avisos {
+        println!("⚠ {aviso}");
+    }
+    println!("✓ {} {}", salida.display(), if informe.pdfx_identificado { "(con OutputIntent)" } else { "" });
+    Ok(())
+}
+
+fn nup(datos: &Path, a: ArgsNup) -> Result<()> {
+    let m = Catalogo::<Maquina>::abrir(datos)?.obtener(&a.maquina)?.clone();
+    let fuente = Fuente::abrir(&a.entrada).with_context(|| format!("no se pudo abrir {}", a.entrada.display()))?;
+    if a.dorso && fuente.paginas.len() % 2 != 0 {
+        bail!("con --dorso el PDF debe tener páginas en pares frente/dorso ({} páginas)", fuente.paginas.len());
+    }
+    let (pieza, avisos) = revisar_paginas(&fuente, a.formato, a.rebase)?;
+    let pliego = pliego_de(&m, a.pliego)?;
     let volteo = match a.volteo {
         VolteoArg::Lateral => Volteo::Lateral,
         VolteoArg::Cabeza => Volteo::Cabeza,
@@ -456,10 +552,6 @@ fn nup(datos: &Path, a: ArgsNup) -> Result<()> {
     let mut margenes = Margenes::de_maquina(&m);
     if a.dorso && !m.duplex {
         margenes = margenes.para_volteo(volteo);
-    }
-    let mut marcas = if a.sin_marcas { OpcionesMarcas::ninguna() } else { OpcionesMarcas::default() };
-    if a.sin_tira_color {
-        marcas.tira_color = false;
     }
     let parametros = ParametrosNup {
         pliego,
@@ -472,7 +564,7 @@ fn nup(datos: &Path, a: ArgsNup) -> Result<()> {
             OrientacionArg::Normal => Orientacion::Normal,
             OrientacionArg::Girada => Orientacion::Girada,
         },
-        marcas,
+        marcas: opciones_marcas(a.sin_marcas, a.sin_tira_color),
     };
     let d = nup::calcular(&parametros)?;
 
@@ -512,21 +604,87 @@ fn nup(datos: &Path, a: ArgsNup) -> Result<()> {
         }
         return Ok(());
     }
+    escribir_salida(&m, fuente, &caras, &a.entrada, &a.salida, avisos)
+}
 
-    let icc = match &m.salida.perfil_icc {
-        Some(ruta) => Some(std::fs::read(ruta).with_context(|| format!("no se pudo leer el ICC {}", ruta.display()))?),
-        None => None,
+fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
+    let m = Catalogo::<Maquina>::abrir(datos)?.obtener(&a.maquina)?.clone();
+    let papel = a.papel.as_deref().map(|id| Catalogo::<Papel>::abrir(datos)?.obtener(id).cloned()).transpose()?;
+    let fuente = Fuente::abrir(&a.entrada).with_context(|| format!("no se pudo abrir {}", a.entrada.display()))?;
+    let (pagina, mut avisos) = revisar_paginas(&fuente, a.formato, a.rebase)?;
+    let encuadernacion = match a.encuadernacion {
+        EncuadernacionArg::Caballete => Encuadernacion::Caballete,
+        EncuadernacionArg::Lomo => Encuadernacion::Lomo,
+        EncuadernacionArg::Cosido => Encuadernacion::Cosido,
     };
-    let titulo = a.entrada.file_stem().map_or_else(|| "Montaje".into(), |s| s.to_string_lossy().into_owned());
-    let opciones = OpcionesSalida { titulo, pdfx: m.salida.pdfx, icc, condicion: m.salida.condicion.clone() };
-    let informe = pdf::escribir(fuente, &caras, &opciones, &a.salida)?;
-    avisos.extend(informe.avisos);
-    if m.salida.jdf {
-        avisos.push("esta máquina pide JDF; la exportación JDF llega en la fase 4".into());
+    let parametros = ParametrosLibro {
+        pliego: pliego_de(&m, a.pliego)?,
+        margenes: Margenes::de_maquina(&m),
+        pagina,
+        paginas: fuente.paginas.len() as u32,
+        encuadernacion,
+        firma: a.firma,
+        rebase: a.rebase,
+        fresado: a.fresado,
+        refile: a.refile,
+        calibre_mm: if a.sin_creep { None } else { papel.as_ref().map(Papel::calibre_mm) },
+        derecha_a_izquierda: a.derecha_a_izquierda,
+        marcas: opciones_marcas(a.sin_marcas, a.sin_tira_color),
+    };
+    let plan = firmas::planificar(&parametros)?;
+    avisos.extend(plan.avisos.iter().cloned());
+
+    println!("Máquina: {} — pliego {}", m.nombre, parametros.pliego);
+    println!(
+        "Libro {pagina}, {} páginas ({} + {} en blanco), {}",
+        plan.paginas_libro,
+        parametros.paginas,
+        plan.blancas,
+        match encuadernacion {
+            Encuadernacion::Caballete => "a caballete (firmas anidadas)",
+            Encuadernacion::Lomo => "al lomo (firmas alzadas, lomo fresado)",
+            Encuadernacion::Cosido => "cosido (firmas alzadas)",
+        }
+    );
+    let mut resumen: Vec<(u32, bool, u32)> = Vec::new();
+    for f in &plan.firmas {
+        match resumen.last_mut() {
+            Some((n, g, cantidad)) if *n == f.paginas && *g == f.girada => *cantidad += 1,
+            _ => resumen.push((f.paginas, f.girada, 1)),
+        }
     }
-    for aviso in &avisos {
-        println!("⚠ {aviso}");
+    for (n, girada, cantidad) in resumen {
+        println!("  {cantidad} × firma de {n} pp{}", if girada { " (girada 90°)" } else { "" });
     }
-    println!("✓ {} {}", a.salida.display(), if informe.pdfx_identificado { "(con OutputIntent)" } else { "" });
-    Ok(())
+    for f in &plan.firmas {
+        let (a, b) = (f.paginas_libro.iter().min().unwrap(), f.paginas_libro.iter().max().unwrap());
+        if encuadernacion == Encuadernacion::Caballete {
+            let mitad = f.paginas_libro.len() / 2;
+            println!(
+                "  Firma {}: págs. {}–{} y {}–{}",
+                f.numero,
+                f.paginas_libro[0],
+                f.paginas_libro[mitad - 1],
+                f.paginas_libro[mitad],
+                f.paginas_libro[f.paginas_libro.len() - 1]
+            );
+        } else {
+            println!("  Firma {}: págs. {a}–{b}", f.numero);
+        }
+    }
+    if encuadernacion == Encuadernacion::Caballete {
+        println!("Creep máximo (hoja central): {:.2} mm", plan.creep_max);
+    } else if let Some(papel) = &papel {
+        let c = libro::calcular_lomo(plan.paginas_libro, papel, None, 0.0)?;
+        println!("Lomo del bloque: {:.1} mm (sin portada)", c.lomo_mm);
+    }
+    println!("Pliegos en el PDF: {} ({} firmas × tiro y retiro)", plan.caras.len(), plan.firmas.len());
+
+    if a.simular {
+        for aviso in &avisos {
+            println!("⚠ {aviso}");
+        }
+        return Ok(());
+    }
+    escribir_salida(&m, fuente, &plan.caras, &a.entrada, &a.salida, avisos)
 }
