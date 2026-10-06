@@ -3,7 +3,8 @@
 //! Todo entra y sale como JSON; los PDF viajan como bytes. Los `planear_*`
 //! solo calculan (para la vista previa) y los `generar_*` escriben el PDF.
 
-use montajes_core::catalogo::{Maquina, VersionPdfx, papeles_de_referencia};
+use montajes_core::catalogo::{Maquina, PerfilSalida, VersionPdfx, papeles_de_referencia};
+use montajes_core::correcciones::Correcciones;
 use montajes_core::geometria::Tamano;
 use montajes_core::imposicion::firmas::{self, Encuadernacion, ParametrosLibro, PlanLibro};
 use montajes_core::imposicion::marcas::OpcionesMarcas;
@@ -115,24 +116,21 @@ fn por_defecto_verdadero() -> bool {
     true
 }
 
-/// Escribe el PDF con el perfil de salida de la máquina.
-fn escribir(
-    fuente: Fuente,
-    caras: &[Cara],
-    pdfx: VersionPdfx,
-    condicion: Option<String>,
-    icc: &[u8],
-    titulo: &str,
-    fecha: u64,
-) -> R<(Vec<u8>, Vec<String>, bool)> {
-    let opciones = OpcionesSalida {
+/// Opciones de salida a partir del perfil de la máquina.
+fn salida(perfil: &PerfilSalida, icc: &[u8], titulo: &str, fecha: u64, correcciones: &Correcciones) -> OpcionesSalida {
+    OpcionesSalida {
         titulo: titulo.into(),
-        pdfx,
+        pdfx: perfil.pdfx,
         icc: (!icc.is_empty()).then(|| icc.to_vec()),
-        condicion,
+        condicion: perfil.condicion.clone(),
         fecha: Some(fecha),
-    };
-    let (mut doc, informe) = pdf::componer(fuente, caras, &opciones).map_err(error)?;
+        correcciones: correcciones.clone(),
+    }
+}
+
+/// Escribe el PDF y devuelve los bytes, los avisos y si quedó identificado como PDF/X.
+fn escribir(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> R<(Vec<u8>, Vec<String>, bool)> {
+    let (mut doc, informe) = pdf::componer(fuente, caras, opciones).map_err(error)?;
     let mut bytes = Vec::new();
     doc.save_to(&mut bytes).map_err(error)?;
     Ok((bytes, informe.avisos, informe.pdfx_identificado))
@@ -202,6 +200,8 @@ struct PeticionNup {
     titulo: String,
     #[serde(default)]
     fecha: u64,
+    #[serde(default)]
+    correcciones: Correcciones,
 }
 
 fn tres() -> f64 {
@@ -265,7 +265,7 @@ pub fn generar_nup(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
     p.paginas = fuente.paginas.len();
     let (par, d, caras) = plan_nup(&p)?;
     let s = &p.maquina.salida;
-    let (bytes, mas, pdfx) = escribir(fuente, &caras, s.pdfx, s.condicion.clone(), icc, &p.titulo, p.fecha)?;
+    let (bytes, mas, pdfx) = escribir(fuente, &caras, &salida(s, icc, &p.titulo, p.fecha, &p.correcciones))?;
     avisos.extend(mas);
     let informe =
         serde_json::to_string(&InformeNup { distribucion: &d, pliego: par.pliego, caras: &caras, avisos, pdfx })
@@ -304,6 +304,8 @@ struct PeticionLibro {
     titulo: String,
     #[serde(default)]
     fecha: u64,
+    #[serde(default)]
+    correcciones: Correcciones,
 }
 
 #[derive(Serialize)]
@@ -355,7 +357,7 @@ pub fn generar_libro(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
     let (par, plan, lomo) = plan_libro(&p)?;
     avisos.extend(plan.avisos.iter().cloned());
     let s = &p.maquina.salida;
-    let (bytes, mas, pdfx) = escribir(fuente, &plan.caras, s.pdfx, s.condicion.clone(), icc, &p.titulo, p.fecha)?;
+    let (bytes, mas, pdfx) = escribir(fuente, &plan.caras, &salida(s, icc, &p.titulo, p.fecha, &p.correcciones))?;
     avisos.extend(mas);
     let informe =
         serde_json::to_string(&InformeLibro { plan: &plan, pliego: par.pliego, lomo, avisos, pdfx }).map_err(error)?;
@@ -392,6 +394,8 @@ struct PeticionPortada {
     fecha: u64,
     #[serde(default)]
     maquina: Option<Maquina>,
+    #[serde(default)]
+    correcciones: Correcciones,
 }
 
 fn calcular_portada(p: &PeticionPortada) -> R<Portada> {
@@ -473,9 +477,9 @@ pub fn armar_portada(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
             fuente.paginas.iter().enumerate().map(|(i, pg)| (p.orden[i], i, pg.tamano_corte())).collect();
         portada::cara_armada(&c, &asignacion, &op).map_err(error)?
     };
-    let (pdfx, condicion) =
-        p.maquina.as_ref().map_or((VersionPdfx::X4, None), |m| (m.salida.pdfx, m.salida.condicion.clone()));
-    let (bytes, avisos, identificado) = escribir(fuente, &[cara], pdfx, condicion, icc, &p.titulo, p.fecha)?;
+    let perfil = p.maquina.as_ref().map(|m| m.salida.clone()).unwrap_or_default();
+    let (bytes, avisos, identificado) =
+        escribir(fuente, &[cara], &salida(&perfil, icc, &p.titulo, p.fecha, &p.correcciones))?;
     #[derive(Serialize)]
     struct InformePortada<'a> {
         portada: &'a Portada,

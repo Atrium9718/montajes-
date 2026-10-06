@@ -30,6 +30,9 @@ pub struct Hallazgo {
     pub mensaje: String,
     /// Páginas afectadas (desde 1).
     pub paginas: Vec<usize>,
+    /// Corrección automática que lo resuelve (campo de [`crate::correcciones::Correcciones`]).
+    #[serde(default)]
+    pub corregible: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,6 +119,30 @@ enum Color {
 struct Estado {
     ctm: Matriz,
     linea: f64,
+    /// Color de relleno y de trazo: blanco o negro 100 % (para la sobreimpresión).
+    relleno: Tono,
+    trazo: Tono,
+    op_relleno: bool,
+    op_trazo: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tono {
+    Blanco,
+    Negro,
+    Otro,
+}
+
+fn tono(operador: &str, v: &[f64]) -> Tono {
+    let cero = |x: &f64| x.abs() < 1e-4;
+    let uno = |x: &f64| (x - 1.0).abs() < 1e-4;
+    match (operador, v) {
+        ("k" | "K", [c, m, y, k]) if cero(c) && cero(m) && cero(y) && uno(k) => Tono::Negro,
+        ("k" | "K", v) if v.len() == 4 && v.iter().all(cero) => Tono::Blanco,
+        ("g" | "G", [g]) if uno(g) => Tono::Blanco,
+        ("rg" | "RG", v) if v.len() == 3 && v.iter().all(uno) => Tono::Blanco,
+        _ => Tono::Otro,
+    }
 }
 
 /// Acumula hallazgos agrupados por código y detalle.
@@ -379,11 +406,42 @@ impl<'a> Revisor<'a> {
             );
             return;
         };
-        let mut estado = Estado { ctm, linea: 1.0 };
+        let mut estado =
+            Estado { ctm, linea: 1.0, relleno: Tono::Otro, trazo: Tono::Otro, op_relleno: false, op_trazo: false };
         let mut pila = Vec::new();
         for op in &c.operations {
             let a = &op.operands;
-            match op.operator.as_str() {
+            let operador = op.operator.as_str();
+            let valores: Vec<f64> = a.iter().filter_map(numero).collect();
+            match operador {
+                "k" | "g" | "rg" | "sc" | "scn" | "cs" => estado.relleno = tono(operador, &valores),
+                "K" | "G" | "RG" | "SC" | "SCN" | "CS" => estado.trazo = tono(operador, &valores),
+                _ => {}
+            }
+            let rellena = matches!(operador, "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "Tj" | "TJ" | "'" | "\"");
+            let traza = matches!(operador, "S" | "s" | "B" | "B*" | "b" | "b*");
+            if (rellena && estado.relleno == Tono::Blanco && estado.op_relleno)
+                || (traza && estado.trazo == Tono::Blanco && estado.op_trazo)
+            {
+                self.acc.agregar(
+                    Nivel::Error,
+                    "sobreimpresion_blanco",
+                    "",
+                    "Hay objetos blancos en sobreimpresión: desaparecerán al imprimir".into(),
+                    pagina,
+                );
+            }
+            if matches!(operador, "Tj" | "TJ" | "'" | "\"") && estado.relleno == Tono::Negro && !estado.op_relleno {
+                self.acc.agregar(
+                    Nivel::Info,
+                    "negro_sin_sobreimpresion",
+                    "",
+                    "Textos en negro 100 % sin sobreimpresión: conviene sobreimprimirlos para evitar filetes blancos"
+                        .into(),
+                    pagina,
+                );
+            }
+            match operador {
                 "q" => pila.push(estado),
                 "Q" => estado = pila.pop().unwrap_or(estado),
                 "cm" => {
@@ -447,6 +505,20 @@ impl<'a> Revisor<'a> {
                     }
                 }
                 "gs" => {
+                    if let Some(gs) =
+                        a.first().and_then(|n| self.recurso(recursos, b"ExtGState", n)).and_then(|g| self.dict(g))
+                    {
+                        let b = |k: &[u8]| gs.get(k).ok().and_then(|o| o.as_bool().ok());
+                        if let Some(v) = b(b"OP") {
+                            estado.op_trazo = v;
+                            if b(b"op").is_none() {
+                                estado.op_relleno = v;
+                            }
+                        }
+                        if let Some(v) = b(b"op") {
+                            estado.op_relleno = v;
+                        }
+                    }
                     if let Some(gs) =
                         a.first().and_then(|n| self.recurso(recursos, b"ExtGState", n)).and_then(|g| self.dict(g))
                     {
@@ -554,7 +626,15 @@ pub fn revisar(fuente: &Fuente, op: &OpcionesPreflight) -> InformePreflight {
         .into_iter()
         .map(|((codigo, _), (nivel, mensaje, mut paginas))| {
             paginas.sort_unstable();
-            Hallazgo { nivel, codigo, mensaje, paginas }
+            let corregible = match codigo.as_str() {
+                "linea_fina" => Some("linea_minima"),
+                "rebase" => Some("rebase_espejo"),
+                "sobreimpresion_blanco" => Some("quitar_sobreimpresion_blanco"),
+                "negro_sin_sobreimpresion" => Some("sobreimprimir_negro"),
+                _ => None,
+            }
+            .map(String::from);
+            Hallazgo { nivel, codigo, mensaje, paginas, corregible }
         })
         .collect();
     hallazgos.sort_by(|a, b| a.nivel.cmp(&b.nivel).then(a.codigo.cmp(&b.codigo)));
@@ -626,7 +706,7 @@ mod pruebas {
             "DeviceCMYK".into(),
             funcion.into(),
         ]);
-        let contenido = b"q 1 0 0 rg 0 0 50 50 re f 1 1 1 1 k 50 0 50 50 re f 0.1 w 0 0 m 100 100 l S /P0 cs 1 scn 0 60 10 10 re f /G0 gs 144 0 0 144 100 100 cm /Im0 Do Q BT /F1 12 Tf 10 10 Td (Hola) Tj ET".to_vec();
+        let contenido = b"q 1 0 0 rg 0 0 50 50 re f 1 1 1 1 k 50 0 50 50 re f 0.1 w 0 0 m 100 100 l S /P0 cs 1 scn 0 60 10 10 re f /G0 gs 144 0 0 144 100 100 cm /Im0 Do Q q /G1 gs 0 0 0 0 k 0 300 20 20 re f Q BT /F1 12 Tf 0 0 0 1 k 10 10 Td (Hola) Tj ET".to_vec();
         let flujo = doc.add_object(Stream::new(dictionary! {}, contenido));
         let pagina = doc.add_object(dictionary! {
             "Type" => "Page", "Parent" => arbol,
@@ -636,7 +716,7 @@ mod pruebas {
                 "Font" => dictionary! { "F1" => fuente },
                 "XObject" => dictionary! { "Im0" => imagen },
                 "ColorSpace" => dictionary! { "P0" => pantone },
-                "ExtGState" => dictionary! { "G0" => dictionary! { "ca" => 0.5 } },
+                "ExtGState" => dictionary! { "G0" => dictionary! { "ca" => 0.5 }, "G1" => dictionary! { "op" => true } },
             },
         });
         doc.objects.insert(
@@ -666,6 +746,9 @@ mod pruebas {
         assert_eq!(inf.tintas_directas, ["PANTONE 186 C"]);
         assert_eq!(codigo("transparencia").unwrap().nivel, Nivel::Info);
         assert!(codigo("sin_trimbox").is_some());
+        let blanco = codigo("sobreimpresion_blanco").unwrap();
+        assert_eq!((blanco.nivel, blanco.corregible.as_deref()), (Nivel::Error, Some("quitar_sobreimpresion_blanco")));
+        assert!(codigo("negro_sin_sobreimpresion").is_some());
         assert!(!inf.listo());
 
         // En PDF/X-1a la transparencia pasa a ser error.

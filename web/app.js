@@ -44,6 +44,33 @@ const estado = {
   portada: { archivo: null, info: null, calculo: null, error: null, op: { ancho: 148, alto: 210, paginas: 240, lomo: "", tipo: "rustica", solapa: 0, carton: 2.5, escuadra: 3, vuelta: 15, bisagra: 8, rebase: 3, rtl: false, orden: ["tapa", "contratapa", "lomo", "solapa_tapa", "solapa_contratapa"] } },
 };
 
+// Correcciones automáticas: preferencia del taller, común a piezas y libros.
+const CORRECCIONES = [
+  ["sobreimprimir_negro", "Sobreimprimir el negro 100 %", "Evita filetes blancos si el registro se mueve."],
+  ["quitar_sobreimpresion_blanco", "Quitar sobreimpresión de blancos", "Si no, los objetos blancos desaparecen al imprimir."],
+  ["linea_minima", "Engrosar líneas finas a 0,25 pt", "Las más finas pueden no verse."],
+  ["rebase_espejo", "Rebase en espejo si falta", "Refleja el borde de la página sobre el rebase."],
+];
+function correcciones() {
+  const c = { sobreimprimir_negro: true, quitar_sobreimpresion_blanco: true, linea_minima: true, rebase_espejo: false, ...(estado.preferencias.correcciones || {}) };
+  return { ...c, linea_minima: c.linea_minima ? 0.25 : null };
+}
+function bloqueCorrecciones(prefijo) {
+  const c = correcciones();
+  return `<details class="avanzado"><summary>Correcciones automáticas</summary><div class="paso">
+    ${CORRECCIONES.map(([k, t, d]) => `<label class="interruptor"><span>${t}<br><small class="tenue">${d}</small></span><input type="checkbox" data-correccion="${k}" id="${prefijo}-${k}" ${c[k] ? "checked" : ""}></label>`).join("")}
+  </div></details>`;
+}
+function conectarCorrecciones(raiz, alCambiar) {
+  $$("[data-correccion]", raiz).forEach((el) => el.addEventListener("change", (e) => {
+    e.stopPropagation();
+    const actual = { ...(estado.preferencias.correcciones || {}) };
+    actual[el.dataset.correccion] = el.checked;
+    preferir("correcciones", actual);
+    alCambiar();
+  }));
+}
+
 function guardarCatalogos() {
   almacen.guardar("maquinas", estado.maquinas);
   almacen.guardar("papeles", estado.papeles);
@@ -208,7 +235,11 @@ function bloquePreflight(trabajo) {
   const resumen = listo && p.advertencias === 0
     ? `<span class="sello sello-ok">✓ Listo para imprimir</span>`
     : `<span class="sello ${listo ? "sello-aviso" : "sello-error"}">${p.errores ? `${p.errores} ${p.errores === 1 ? "error" : "errores"}` : ""}${p.errores && p.advertencias ? " · " : ""}${p.advertencias ? `${p.advertencias} ${p.advertencias === 1 ? "aviso" : "avisos"}` : ""}</span>`;
-  const items = p.hallazgos.map((h, i) => `<li class="revision-${h.nivel}"><span>${esc(h.mensaje)}</span><small>${h.paginas.length === trabajo.info?.paginas.length && h.paginas.length > 1 ? "todas las páginas" : `pág. ${esc(p.rangos[i])}`}</small></li>`).join("");
+  const corr = correcciones();
+  const items = p.hallazgos.map((h, i) => {
+    const arreglo = h.corregible ? (corr[h.corregible] ? `<em class="se-corrige">se corrige al generar</em>` : `<em class="puede-corregirse">tiene corrección automática</em>`) : "";
+    return `<li class="revision-${h.nivel}"><span>${esc(h.mensaje)}</span><small>${h.paginas.length === trabajo.info?.paginas.length && h.paginas.length > 1 ? "todas las páginas" : `pág. ${esc(p.rangos[i])}`} ${arreglo}</small></li>`;
+  }).join("");
   return `<div class="revision">
     <div class="revision-cabeza"><b>Revisión del PDF</b>${resumen}</div>
     ${items ? `<details ${p.errores ? "open" : ""}><summary>${p.hallazgos.length} ${p.hallazgos.length === 1 ? "punto" : "puntos"} revisados</summary><ul class="revision-lista">${items}</ul></details>` : ""}
@@ -423,6 +454,7 @@ function vistaPiezas(main) {
               </div>
             </div>
           </details>
+          ${bloqueCorrecciones("pz")}
         </section>
       </div>
       <div class="resultado" id="pz-resultado"></div>
@@ -440,8 +472,9 @@ function vistaPiezas(main) {
     o.pliegoAlto = $("#pz-pliego-alto").value || null;
     if ($("#pz-maquina")) preferir("maquina", $("#pz-maquina").value);
   };
+  conectarCorrecciones(main, () => vistaPiezas(main));
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file") return;
+    if (el.type === "file" || el.dataset.correccion) return;
     const antes = { dorso: o.dorso, rebase: o.rebase, maquina: estado.preferencias.maquina };
     leerOpciones();
     if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaPiezas(main); return; }
@@ -458,7 +491,7 @@ function peticionPiezas(maquina, info, orientacion) {
     maquina, formato: info.formato, paginas: info.paginas.length, pliego,
     rebase: o.rebase, calle: o.calle, orientacion: orientacion || o.orientacion,
     dorso: o.dorso, volteo: o.volteo, marcas: o.marcas, tira_color: o.tira,
-    titulo: base(estado.piezas.archivo?.nombre), fecha: ahora(),
+    titulo: base(estado.piezas.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
   };
 }
 
@@ -510,7 +543,8 @@ function calcularPiezas() {
       const r = motor.generar_nup(t.archivo.bytes, JSON.stringify(peticionPiezas(maquina, t.info)), icc);
       descargar(r.pdf, `${base(t.archivo.nombre)}-montaje.pdf`);
       const inf = JSON.parse(r.informe);
-      avisar(inf.pdfx ? "PDF listo (con perfil de salida)" : "PDF listo. Carga un perfil ICC en la máquina para identificarlo como PDF/X");
+      const corregidos = inf.avisos.filter((a) => a.startsWith("corregido")).length;
+      avisar(`${inf.pdfx ? "PDF listo (con perfil de salida)" : "PDF listo"}${corregidos ? ` · ${corregidos} correcciones aplicadas` : ""}`);
     } catch (err) { avisar(`Error: ${err.message || err}`); }
     b.disabled = false; b.textContent = "Descargar PDF listo para imprimir";
   });
@@ -553,14 +587,16 @@ function vistaLibro(main) {
               ${interruptor("lb-tira", "Tira de control de color", o.tira)}
             </div>
           </details>
+          ${bloqueCorrecciones("lb")}
         </section>
       </div>
       <div class="resultado" id="lb-resultado"></div>
     </div>`;
   conectarArchivo("lb-archivo", (a) => { analizarArchivo(t, a); vistaLibro(main); });
   $("#lb-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaLibro(main); });
+  conectarCorrecciones(main, () => vistaLibro(main));
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file") return;
+    if (el.type === "file" || el.dataset.correccion) return;
     const antes = { rebase: o.rebase, maquina: estado.preferencias.maquina };
     o.rebase = num($("#lb-rebase").value, 3);
     o.refile = num($("#lb-refile").value, 3);
@@ -586,7 +622,7 @@ function peticionLibro(maquina, info) {
     firma: o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
     derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira,
-    titulo: base(estado.libro.archivo?.nombre), fecha: ahora(),
+    titulo: base(estado.libro.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
   };
 }
 
@@ -654,7 +690,8 @@ function calcularLibro() {
       const icc = (await iccDB.leer(maquina.id)) || new Uint8Array();
       const r = motor.generar_libro(t.archivo.bytes, JSON.stringify(peticionLibro(maquina, t.info)), icc);
       descargar(r.pdf, `${base(t.archivo.nombre)}-pliegos.pdf`);
-      avisar("Pliegos listos");
+      const corregidos = JSON.parse(r.informe).avisos.filter((a) => a.startsWith("corregido")).length;
+      avisar(`Pliegos listos${corregidos ? ` · ${corregidos} correcciones aplicadas` : ""}`);
     } catch (err) { avisar(`Error: ${err.message || err}`); }
     b.disabled = false; b.textContent = "Descargar pliegos";
   });

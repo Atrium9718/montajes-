@@ -273,3 +273,6 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; margin-t
 .revision-error::before { background: var(--error); }
 .revision-advertencia::before { background: var(--naranja); }
 .revision-info::before { background: var(--lavanda); }
+.se-corrige, .puede-corregirse { font-style: normal; font-weight: 600; font-size: 11px; padding: 1px 8px; border-radius: 999px; margin-left: 4px; white-space: nowrap; }
+.se-corrige { background: var(--lima); color: #111; }
+.puede-corregirse { background: var(--superficie-2); color: var(--tinta-suave); }

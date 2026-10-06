@@ -26,7 +26,7 @@ montajes papel agregar --id bond75-prov --nombre "Bond 75 g proveedor X" --grama
 # 3. Revisar un PDF (preflight) y montarlo
 montajes info tarjetas.pdf
 montajes preflight tarjetas.pdf --cobertura 320
-montajes nup tarjetas.pdf -s pliego.pdf -m xerox --dorso
+montajes nup tarjetas.pdf -s pliego.pdf -m xerox --dorso --corregir --rebase-espejo
 montajes nup volante.pdf -s planta.pdf -m sm74 --pliego 500x350 --calle 4 --dorso --volteo cabeza
 
 # 4. Libros y revistas

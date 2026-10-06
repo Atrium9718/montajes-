@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use montajes_core::catalogo::{
     Catalogo, Fibra, Maquina, Papel, PerfilSalida, Plancha, TipoMaquina, VersionPdfx, papeles_de_referencia,
 };
+use montajes_core::correcciones::Correcciones;
 use montajes_core::geometria::Tamano;
 use montajes_core::imposicion::Cara;
 use montajes_core::imposicion::firmas::{self, Encuadernacion, ParametrosLibro};
@@ -243,6 +244,8 @@ struct ArgsNup {
     sin_marcas: bool,
     #[arg(long)]
     sin_tira_color: bool,
+    #[command(flatten)]
+    correccion: ArgsCorreccion,
     /// Solo calcular y mostrar el montaje, sin escribir el PDF.
     #[arg(long)]
     simular: bool,
@@ -300,6 +303,8 @@ struct ArgsLibro {
     sin_marcas: bool,
     #[arg(long)]
     sin_tira_color: bool,
+    #[command(flatten)]
+    correccion: ArgsCorreccion,
     /// Solo calcular y mostrar el plan, sin escribir el PDF.
     #[arg(long)]
     simular: bool,
@@ -407,6 +412,25 @@ struct ArgsDimPortada {
     rebase: f64,
     #[arg(long)]
     derecha_a_izquierda: bool,
+}
+
+#[derive(Args)]
+struct ArgsCorreccion {
+    /// Correcciones recomendadas: sobreimprimir negro 100 %, quitar
+    /// sobreimpresión de blancos y engrosar líneas a 0,25 pt.
+    #[arg(long)]
+    corregir: bool,
+    /// Generar el rebase reflejando la página cuando el PDF no lo trae.
+    #[arg(long)]
+    rebase_espejo: bool,
+}
+
+impl ArgsCorreccion {
+    fn correcciones(&self) -> Correcciones {
+        let mut c = if self.corregir { Correcciones::recomendadas() } else { Correcciones::ninguna() };
+        c.rebase_espejo = self.rebase_espejo;
+        c
+    }
 }
 
 fn parse_tamano(s: &str) -> Result<Tamano, String> {
@@ -620,6 +644,7 @@ fn opciones_marcas(sin_marcas: bool, sin_tira_color: bool) -> OpcionesMarcas {
 /// Escribe el PDF con la configuración de salida de la máquina e imprime los avisos.
 fn escribir_salida(
     perfil: &PerfilSalida,
+    correcciones: Correcciones,
     fuente: Fuente,
     caras: &[Cara],
     entrada: &Path,
@@ -631,7 +656,14 @@ fn escribir_salida(
         None => None,
     };
     let titulo = entrada.file_stem().map_or_else(|| "Montaje".into(), |s| s.to_string_lossy().into_owned());
-    let opciones = OpcionesSalida { titulo, pdfx: perfil.pdfx, icc, condicion: perfil.condicion.clone(), fecha: None };
+    let opciones = OpcionesSalida {
+        titulo,
+        pdfx: perfil.pdfx,
+        icc,
+        condicion: perfil.condicion.clone(),
+        fecha: None,
+        correcciones,
+    };
     let informe = pdf::escribir(fuente, caras, &opciones, salida)?;
     avisos.extend(informe.avisos);
     if perfil.jdf {
@@ -696,7 +728,7 @@ fn nup(datos: &Path, a: ArgsNup) -> Result<()> {
         }
         return Ok(());
     }
-    escribir_salida(&m.salida, fuente, &caras, &a.entrada, &a.salida, avisos)
+    escribir_salida(&m.salida, a.correccion.correcciones(), fuente, &caras, &a.entrada, &a.salida, avisos)
 }
 
 fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
@@ -778,7 +810,7 @@ fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
         }
         return Ok(());
     }
-    escribir_salida(&m.salida, fuente, &plan.caras, &a.entrada, &a.salida, avisos)
+    escribir_salida(&m.salida, a.correccion.correcciones(), fuente, &plan.caras, &a.entrada, &a.salida, avisos)
 }
 
 /// Calcula la portada y una descripción legible de cómo se obtuvo el lomo.
@@ -926,7 +958,7 @@ fn portada_cmd(datos: &Path, c: ComandoPortada) -> Result<()> {
                 Some(id) => Catalogo::<Maquina>::abrir(datos)?.obtener(&id)?.salida.clone(),
                 None => PerfilSalida::default(),
             };
-            escribir_salida(&perfil, f, &[cara], &entrada, &salida, Vec::new())?;
+            escribir_salida(&perfil, Correcciones::ninguna(), f, &[cara], &entrada, &salida, Vec::new())?;
             println!("Para imprimir varias en un pliego: montajes nup {} -s pliego.pdf -m <máquina>", salida.display());
         }
     }

@@ -79,6 +79,7 @@ fn tarjetas_frente_y_dorso() {
         icc: Some(vec![0; 128]),
         condicion: Some("FOGRA39".into()),
         fecha: Some(1_760_000_000),
+        correcciones: Default::default(),
     };
     let (mut doc, informe) = componer(fuente, &caras, &opciones).unwrap();
     assert!(informe.pdfx_identificado);

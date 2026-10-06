@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat, dictionary};
 
 use crate::catalogo::VersionPdfx;
+use crate::correcciones::{Conteo, Correcciones, FormaPendiente, corregir_flujo, recursos_con_sobreimpresion};
 use crate::geometria::{Rect, Tamano};
 use crate::imposicion::Cara;
 use crate::imposicion::marcas::Marcas;
@@ -211,6 +212,8 @@ pub struct OpcionesSalida {
     /// Segundos desde 1970 (UTC) para las fechas del PDF. En el navegador
     /// no hay reloj del sistema y se debe indicar; si falta, se usa el reloj.
     pub fecha: Option<u64>,
+    /// Correcciones automáticas de preflight.
+    pub correcciones: Correcciones,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -245,6 +248,9 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
 
     // 1. Un Form XObject por cada página de entrada que se usa.
     let mut formas: BTreeMap<usize, ObjectId> = BTreeMap::new();
+    let mut conteo = Conteo::default();
+    let mut pendientes = Vec::new();
+    let mut espejos = 0;
     for cara in caras {
         for u in &cara.ubicaciones {
             if formas.contains_key(&u.pagina) {
@@ -253,10 +259,11 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
             let p = paginas
                 .get(u.pagina)
                 .ok_or_else(|| Error::Invalido(format!("la página {} no existe en la entrada", u.pagina + 1)))?;
-            let id = crear_forma(&mut doc, p)?;
+            let id = crear_forma(&mut doc, p, &opciones.correcciones, &mut conteo, &mut pendientes)?;
             formas.insert(u.pagina, id);
         }
     }
+    corregir_formas_anidadas(&mut doc, &opciones.correcciones, &mut conteo, pendientes);
 
     // 2. Espacio de color de registro: separación «All» (sale en todas las planchas).
     let funcion = doc.add_object(dictionary! {
@@ -285,21 +292,42 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
             xobjetos.set(nombre.as_bytes(), Object::Reference(formas[&u.pagina]));
             let giro = (p.giro + u.giro) % 360;
             let m = matriz_colocacion(&p.corte, giro, mm_a_pt(u.corte.x), mm_a_pt(u.corte.y));
-            let r = u.recorte;
-            contenido.push_str(&format!(
-                "q {} {} {} {} re W n {} {} {} {} {} {} cm /{} Do Q\n",
-                n(mm_a_pt(r.x)),
-                n(mm_a_pt(r.y)),
-                n(mm_a_pt(r.ancho)),
-                n(mm_a_pt(r.alto)),
-                n(m[0]),
-                n(m[1]),
-                n(m[2]),
-                n(m[3]),
-                n(m[4]),
-                n(m[5]),
-                nombre
-            ));
+            let (c, r) = (u.corte, u.recorte);
+            // Cuánto rebase pide cada lado: izquierda, abajo, derecha, arriba.
+            let pide = [c.x - r.x, c.y - r.y, r.derecha() - c.derecha(), r.arriba() - c.arriba()];
+            let tiene = p.rebase_disponible();
+            let falta = pide.map(|v| v > tiene + 0.05);
+            if opciones.correcciones.rebase_espejo && falta.iter().any(|f| *f) {
+                // Rebase en espejo: se refleja la página sobre cada borde de corte
+                // que no tiene rebase suficiente (y sobre las esquinas).
+                espejos += 1;
+                let (x0, y0, x1, y1) = (mm_a_pt(c.x), mm_a_pt(c.y), mm_a_pt(c.derecha()), mm_a_pt(c.arriba()));
+                let refl_x = |a: f64| [-1.0, 0.0, 0.0, 1.0, 2.0 * a, 0.0];
+                let refl_y = |b: f64| [1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * b];
+                let [fi, fb, fd, fa] = falta;
+                let [pi, pb, pd, pa] = pide;
+                let franjas: [(bool, Rect, Vec<[f64; 6]>); 8] = [
+                    (fi, Rect::new(r.x, c.y, pi, c.alto), vec![refl_x(x0)]),
+                    (fd, Rect::new(c.derecha(), c.y, pd, c.alto), vec![refl_x(x1)]),
+                    (fb, Rect::new(c.x, r.y, c.ancho, pb), vec![refl_y(y0)]),
+                    (fa, Rect::new(c.x, c.arriba(), c.ancho, pa), vec![refl_y(y1)]),
+                    (fi && fb, Rect::new(r.x, r.y, pi, pb), vec![refl_x(x0), refl_y(y0)]),
+                    (fd && fb, Rect::new(c.derecha(), r.y, pd, pb), vec![refl_x(x1), refl_y(y0)]),
+                    (fi && fa, Rect::new(r.x, c.arriba(), pi, pa), vec![refl_x(x0), refl_y(y1)]),
+                    (fd && fa, Rect::new(c.derecha(), c.arriba(), pd, pa), vec![refl_x(x1), refl_y(y1)]),
+                ];
+                for (aplica, zona, reflejos) in franjas {
+                    if aplica && zona.ancho > 0.0 && zona.alto > 0.0 {
+                        let mt = reflejos.iter().fold(m, |acc, refl| multiplicar(&acc, refl));
+                        colocar(&mut contenido, zona, &mt, &nombre);
+                    }
+                }
+                // La página encima, con el rebase real que sí trae.
+                let propio = pide.map(|v| v.min(tiene));
+                colocar(&mut contenido, c.expandir(propio[0], propio[1], propio[2], propio[3]), &m, &nombre);
+            } else {
+                colocar(&mut contenido, r, &m, &nombre);
+            }
         }
         dibujar_marcas(&cara.marcas, &mut contenido);
         informe.avisos.extend(cara.marcas.avisos.iter().map(|a| format!("{}: {a}", cara.nombre)));
@@ -324,6 +352,12 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
             },
         });
         hijos.push(Object::Reference(pagina));
+    }
+    informe.avisos.extend(conteo.avisos());
+    if espejos > 0 {
+        informe
+            .avisos
+            .push(format!("corregido: rebase generado en espejo en {espejos} ubicaciones sin rebase suficiente"));
     }
     let cantidad = hijos.len() as i64;
     doc.objects
@@ -582,9 +616,53 @@ pub fn documento_plantilla_portada(c: &Portada, titulo: &str, nota: &str) -> Doc
     doc
 }
 
-fn crear_forma(doc: &mut Document, p: &PaginaFuente) -> Resultado<ObjectId> {
-    let contenido = doc.get_page_content_with_limit(p.id, LIMITE_CONTENIDO)?;
-    let recursos = heredado(doc, p.id, b"Resources").unwrap_or_else(|| Object::Dictionary(Dictionary::new()));
+/// Dibuja la página `nombre` recortada a `zona` (mm) con la matriz `m` (pt).
+fn colocar(s: &mut String, zona: Rect, m: &[f64; 6], nombre: &str) {
+    s.push_str(&format!(
+        "q {} {} {} {} re W n {} {} {} {} {} {} cm /{} Do Q\n",
+        n(mm_a_pt(zona.x)),
+        n(mm_a_pt(zona.y)),
+        n(mm_a_pt(zona.ancho)),
+        n(mm_a_pt(zona.alto)),
+        n(m[0]),
+        n(m[1]),
+        n(m[2]),
+        n(m[3]),
+        n(m[4]),
+        n(m[5]),
+        nombre
+    ));
+}
+
+/// `a × b`: primero se aplica `a`, luego `b`.
+fn multiplicar(a: &[f64; 6], b: &[f64; 6]) -> [f64; 6] {
+    [
+        a[0] * b[0] + a[1] * b[2],
+        a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2],
+        a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4],
+        a[4] * b[1] + a[5] * b[3] + b[5],
+    ]
+}
+
+fn crear_forma(
+    doc: &mut Document,
+    p: &PaginaFuente,
+    corr: &Correcciones,
+    conteo: &mut Conteo,
+    pendientes: &mut Vec<FormaPendiente>,
+) -> Resultado<ObjectId> {
+    let mut contenido = doc.get_page_content_with_limit(p.id, LIMITE_CONTENIDO)?;
+    let mut recursos = heredado(doc, p.id, b"Resources").unwrap_or_else(|| Object::Dictionary(Dictionary::new()));
+    if corr.reescribe_contenido() {
+        let dict = resolver(doc, &recursos).as_dict().ok();
+        let identidad = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        if let Some(nuevo) = corregir_flujo(doc, &contenido, dict, identidad, corr, conteo, pendientes) {
+            contenido = nuevo;
+            recursos = Object::Dictionary(recursos_con_sobreimpresion(doc, Some(&recursos)));
+        }
+    }
     let mut dict = dictionary! {
         "Type" => "XObject",
         "Subtype" => "Form",
@@ -596,6 +674,38 @@ fn crear_forma(doc: &mut Document, p: &PaginaFuente) -> Resultado<ObjectId> {
         dict.set("Group", grupo.clone());
     }
     Ok(doc.add_object(Stream::new(dict, contenido)))
+}
+
+/// Corrige los Form XObjects que usan las páginas (y los que estos usan).
+fn corregir_formas_anidadas(
+    doc: &mut Document,
+    corr: &Correcciones,
+    conteo: &mut Conteo,
+    mut pendientes: Vec<FormaPendiente>,
+) {
+    let mut hechas = std::collections::HashSet::new();
+    while let Some(f) = pendientes.pop() {
+        if !hechas.insert(f.id) || hechas.len() > 10_000 {
+            continue;
+        }
+        let Ok(Object::Stream(s)) = doc.get_object(f.id) else { continue };
+        let Ok(datos) = s.decompressed_content().or_else(|_| Ok::<_, ()>(s.content.clone())) else { continue };
+        let recursos = s.dict.get(b"Resources").ok().cloned();
+        let dict = recursos.as_ref().and_then(|r| resolver(doc, r).as_dict().ok());
+        let mut nuevas = Vec::new();
+        let Some(nuevo) = corregir_flujo(doc, &datos, dict, f.ctm, corr, conteo, &mut nuevas) else {
+            pendientes.extend(nuevas);
+            continue;
+        };
+        let recursos = recursos_con_sobreimpresion(doc, recursos.as_ref());
+        pendientes.extend(nuevas);
+        if let Ok(Object::Stream(s)) = doc.get_object_mut(f.id) {
+            s.dict.remove(b"Filter");
+            s.dict.remove(b"DecodeParms");
+            s.dict.set("Resources", recursos);
+            s.set_plain_content(nuevo);
+        }
+    }
 }
 
 fn dibujar_marcas(m: &Marcas, s: &mut String) {
