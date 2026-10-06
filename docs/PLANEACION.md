@@ -261,7 +261,7 @@ Trabajo
 
 | Tema | Decisión |
 |---|---|
-| Plataforma | **Escritorio primero** (Tauri) con el mismo motor Rust, que luego se compila a WASM para la versión web. El motor también se expone por CLI y API para la automatización. |
+| Plataforma | **Web primero** (cambio de plan, para publicarla en montajes.atrioagencia.com): el motor Rust compilado a WebAssembly corre en el navegador, así que los PDF no salen del computador y basta un hosting estático. La app de escritorio (Tauri) reutilizará la misma interfaz y el mismo motor. El motor también se usa por CLI. |
 | Máquinas | Hay varias de litografía y digitales. El sistema tiene un **catálogo de máquinas editable**: pliego máx/mín, pinza, cola, laterales, plancha, colores, dúplex y perfil de salida. Se guarda y se reutiliza. |
 | Papeles | Todos los papeles y calibres. Hay un **catálogo de papeles editable** (gramaje, calibre, estucado, fibra, formatos) con una biblioteca inicial de referencia que se ajusta con la ficha de cada proveedor. |
 | RIP/CTP | Cada máquina define su salida: versión PDF/X, perfil ICC y condición (FOGRA39, GRACoL…), y si necesita JDF. |
@@ -282,4 +282,5 @@ Trabajo
   - Plantilla PDF para el diseñador con guías en una capa que no imprime.
   - Armado desde páginas sueltas, o verificación de una portada completa.
   - Comando `montajes portada`.
+- [x] **App web** (`web/`): inicio, piezas, libros, portadas y catálogos con el diseño dormi. Tiene vista previa del pliego en vivo, catálogos guardados en el navegador (con exportar e importar) y perfiles ICC por máquina.
 - [ ] Fase 3, pendiente: firmas de 12/24 pp, varias firmas iguales por pliego (work & turn de firmas), insertos.

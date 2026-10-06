@@ -1,3 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/montajes-core", "crates/montajes-cli"]
+members = ["crates/montajes-core", "crates/montajes-cli", "crates/montajes-web"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"

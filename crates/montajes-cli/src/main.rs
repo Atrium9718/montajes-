@@ -577,24 +577,8 @@ fn lomo(datos: &Path, a: ArgsLomo) -> Result<()> {
     Ok(())
 }
 
-/// Verifica que todas las páginas tengan el mismo formato final y suficiente rebase.
 fn revisar_paginas(fuente: &Fuente, formato: Option<Tamano>, rebase: f64) -> Result<(Tamano, Vec<String>)> {
-    let formato = formato.unwrap_or_else(|| fuente.paginas[0].tamano_corte());
-    let mut avisos = Vec::new();
-    for (i, p) in fuente.paginas.iter().enumerate() {
-        let t = p.tamano_corte();
-        if (t.ancho - formato.ancho).abs() > 0.5 || (t.alto - formato.alto).abs() > 0.5 {
-            bail!("la página {} mide {t} y el formato es {formato} (¿falta TrimBox o el giro?)", i + 1);
-        }
-        if p.rebase_disponible() + 0.05 < rebase {
-            avisos.push(format!(
-                "página {}: tiene {:.1} mm de rebase y se pidieron {rebase} mm",
-                i + 1,
-                p.rebase_disponible()
-            ));
-        }
-    }
-    Ok((formato, avisos))
+    Ok(fuente.formato_comun(formato, rebase)?)
 }
 
 fn pliego_de(m: &Maquina, pedido: Option<Tamano>) -> Result<Tamano> {
@@ -627,7 +611,7 @@ fn escribir_salida(
         None => None,
     };
     let titulo = entrada.file_stem().map_or_else(|| "Montaje".into(), |s| s.to_string_lossy().into_owned());
-    let opciones = OpcionesSalida { titulo, pdfx: perfil.pdfx, icc, condicion: perfil.condicion.clone() };
+    let opciones = OpcionesSalida { titulo, pdfx: perfil.pdfx, icc, condicion: perfil.condicion.clone(), fecha: None };
     let informe = pdf::escribir(fuente, caras, &opciones, salida)?;
     avisos.extend(informe.avisos);
     if perfil.jdf {
@@ -671,22 +655,7 @@ fn nup(datos: &Path, a: ArgsNup) -> Result<()> {
     };
     let d = nup::calcular(&parametros)?;
 
-    let mut caras = Vec::new();
-    if a.dorso {
-        for par in 0..fuente.paginas.len() / 2 {
-            let mut tiro = nup::cara_tiro(&parametros, &d, 2 * par);
-            tiro.nombre = format!("Diseño {} tiro", par + 1);
-            let mut retiro = nup::cara_retiro(&parametros, &d, 2 * par + 1, volteo);
-            retiro.nombre = format!("Diseño {} retiro", par + 1);
-            caras.extend([tiro, retiro]);
-        }
-    } else {
-        for i in 0..fuente.paginas.len() {
-            let mut tiro = nup::cara_tiro(&parametros, &d, i);
-            tiro.nombre = format!("Diseño {}", i + 1);
-            caras.push(tiro);
-        }
-    }
+    let caras = nup::caras_trabajo(&parametros, &d, fuente.paginas.len(), a.dorso.then_some(volteo));
 
     println!("Máquina: {} — pliego {pliego}, pinza {} mm", m.nombre, margenes.pinza);
     println!(

@@ -125,6 +125,32 @@ fn resolver<'a>(doc: &'a Document, o: &'a Object) -> &'a Object {
     }
 }
 
+impl Fuente {
+    /// Formato común de todas las páginas (o el pedido) y avisos de rebase.
+    /// Falla si alguna página mide distinto.
+    pub fn formato_comun(&self, formato: Option<Tamano>, rebase: f64) -> Resultado<(Tamano, Vec<String>)> {
+        let formato = formato.unwrap_or_else(|| self.paginas[0].tamano_corte());
+        let mut avisos = Vec::new();
+        for (i, p) in self.paginas.iter().enumerate() {
+            let t = p.tamano_corte();
+            if (t.ancho - formato.ancho).abs() > 0.5 || (t.alto - formato.alto).abs() > 0.5 {
+                return Err(Error::Invalido(format!(
+                    "la página {} mide {t} y el formato es {formato} (¿falta TrimBox o el giro?)",
+                    i + 1
+                )));
+            }
+            if p.rebase_disponible() + 0.05 < rebase {
+                avisos.push(format!(
+                    "página {}: tiene {:.1} mm de rebase y se pidieron {rebase} mm",
+                    i + 1,
+                    p.rebase_disponible()
+                ));
+            }
+        }
+        Ok((formato, avisos))
+    }
+}
+
 /// Atributo de página heredable (MediaBox, CropBox, Rotate, Resources).
 fn heredado(doc: &Document, pagina: ObjectId, clave: &[u8]) -> Option<Object> {
     let mut actual = doc.get_dictionary(pagina).ok()?;
@@ -167,6 +193,9 @@ pub struct OpcionesSalida {
     pub icc: Option<Vec<u8>>,
     /// Identificador de la condición, p. ej. `FOGRA39`.
     pub condicion: Option<String>,
+    /// Segundos desde 1970 (UTC) para las fechas del PDF. En el navegador
+    /// no hay reloj del sistema y se debe indicar; si falta, se usa el reloj.
+    pub fecha: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -312,7 +341,7 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
         catalogo.set("OCProperties", oc.clone());
     }
 
-    let ahora = Fecha::ahora();
+    let ahora = Fecha::desde(opciones.fecha.unwrap_or_else(segundos_actuales));
     let version_pdfx = match opciones.pdfx {
         VersionPdfx::X4 => "PDF/X-4",
         VersionPdfx::X1a => "PDF/X-1a:2003",
@@ -384,6 +413,12 @@ pub fn mm_es(v: f64) -> String {
 /// rebase y guías (corte, rebase, pliegues, zona segura, rótulos) en una capa
 /// que se ve en pantalla pero no se imprime.
 pub fn plantilla_portada(c: &Portada, titulo: &str, nota: &str, destino: &Path) -> Resultado<()> {
+    documento_plantilla_portada(c, titulo, nota).save(destino)?;
+    Ok(())
+}
+
+/// Igual que [`plantilla_portada`], pero en memoria.
+pub fn documento_plantilla_portada(c: &Portada, titulo: &str, nota: &str) -> Document {
     const MARGEN: f64 = 20.0;
     let r = c.rebase;
     let ancho = c.tamano.ancho + 2.0 * (r + MARGEN);
@@ -529,8 +564,7 @@ pub fn plantilla_portada(c: &Portada, titulo: &str, nota: &str, destino: &Path) 
     doc.trailer.set("Root", catalogo);
     doc.trailer.set("Info", info);
     doc.compress();
-    doc.save(destino)?;
-    Ok(())
+    doc
 }
 
 fn crear_forma(doc: &mut Document, p: &PaginaFuente) -> Resultado<ObjectId> {
@@ -628,6 +662,10 @@ fn circulo(s: &mut String, x: f64, y: f64, r: f64) {
     s.push_str(&format!("{} {} {} {} {} {} c\n", n(x + k), n(y - r), n(x + r), n(y - k), n(x + r), n(y)));
 }
 
+fn segundos_actuales() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 /// Fecha UTC sin dependencias externas.
 struct Fecha {
     segundos: u64,
@@ -640,8 +678,7 @@ struct Fecha {
 }
 
 impl Fecha {
-    fn ahora() -> Self {
-        let segundos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    fn desde(segundos: u64) -> Self {
         // Algoritmo de días civiles de Howard Hinnant.
         let dias = (segundos / 86_400) as i64 + 719_468;
         let era = dias.div_euclid(146_097);

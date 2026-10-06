@@ -1,0 +1,464 @@
+//! Puente entre el motor y el navegador (WebAssembly).
+//!
+//! Todo entra y sale como JSON; los PDF viajan como bytes. Los `planear_*`
+//! solo calculan (para la vista previa) y los `generar_*` escriben el PDF.
+
+use montajes_core::catalogo::{Maquina, VersionPdfx, papeles_de_referencia};
+use montajes_core::geometria::Tamano;
+use montajes_core::imposicion::firmas::{self, Encuadernacion, ParametrosLibro, PlanLibro};
+use montajes_core::imposicion::marcas::OpcionesMarcas;
+use montajes_core::imposicion::nup::{self, Distribucion, Orientacion, ParametrosNup};
+use montajes_core::imposicion::{Cara, Margenes, Volteo};
+use montajes_core::pdf::{self, Fuente, OpcionesSalida};
+use montajes_core::portada::{self, ParametrosPortada, Portada, TipoPanel, TipoPortada};
+use montajes_core::{Error, libro};
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::prelude::*;
+
+type R<T> = Result<T, JsError>;
+
+fn error(e: impl std::fmt::Display) -> JsError {
+    JsError::new(&e.to_string())
+}
+
+/// PDF generado y su informe en JSON.
+#[wasm_bindgen]
+pub struct Resultado {
+    pdf: Vec<u8>,
+    informe: String,
+}
+
+#[wasm_bindgen]
+impl Resultado {
+    #[wasm_bindgen(getter)]
+    pub fn pdf(&self) -> Vec<u8> {
+        self.pdf.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn informe(&self) -> String {
+        self.informe.clone()
+    }
+}
+
+#[wasm_bindgen]
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").into()
+}
+
+#[wasm_bindgen]
+pub fn papeles_referencia() -> String {
+    serde_json::to_string(&papeles_de_referencia()).unwrap_or_default()
+}
+
+#[derive(Serialize)]
+struct InfoPagina {
+    ancho: f64,
+    alto: f64,
+    rebase: f64,
+    giro: u16,
+    trimbox: bool,
+}
+
+#[derive(Serialize)]
+struct InfoPdf {
+    paginas: Vec<InfoPagina>,
+    /// Formato común si todas las páginas miden lo mismo.
+    formato: Option<Tamano>,
+}
+
+/// Formato, rebase y giro de cada página.
+#[wasm_bindgen]
+pub fn analizar(pdf: &[u8]) -> R<String> {
+    let f = Fuente::desde_bytes(pdf).map_err(error)?;
+    let paginas = f
+        .paginas
+        .iter()
+        .map(|p| {
+            let t = p.tamano_corte();
+            InfoPagina {
+                ancho: t.ancho,
+                alto: t.alto,
+                rebase: p.rebase_disponible(),
+                giro: p.giro,
+                trimbox: p.tiene_trimbox,
+            }
+        })
+        .collect();
+    let formato = f.formato_comun(None, 0.0).ok().map(|(t, _)| t);
+    serde_json::to_string(&InfoPdf { paginas, formato }).map_err(error)
+}
+
+fn pliego(m: &Maquina, pedido: Option<Tamano>) -> R<Tamano> {
+    let p = pedido.unwrap_or(m.pliego_max);
+    if p.ancho > m.pliego_max.ancho + 0.01 || p.alto > m.pliego_max.alto + 0.01 {
+        return Err(error(format!("el pliego {p} excede el máximo de «{}» ({})", m.nombre, m.pliego_max)));
+    }
+    Ok(p)
+}
+
+fn marcas(con_marcas: bool, tira_color: bool) -> OpcionesMarcas {
+    let mut m = if con_marcas { OpcionesMarcas::default() } else { OpcionesMarcas::ninguna() };
+    m.tira_color = m.tira_color && tira_color;
+    m
+}
+
+fn por_defecto_verdadero() -> bool {
+    true
+}
+
+/// Escribe el PDF con el perfil de salida de la máquina.
+fn escribir(
+    fuente: Fuente,
+    caras: &[Cara],
+    pdfx: VersionPdfx,
+    condicion: Option<String>,
+    icc: &[u8],
+    titulo: &str,
+    fecha: u64,
+) -> R<(Vec<u8>, Vec<String>, bool)> {
+    let opciones = OpcionesSalida {
+        titulo: titulo.into(),
+        pdfx,
+        icc: (!icc.is_empty()).then(|| icc.to_vec()),
+        condicion,
+        fecha: Some(fecha),
+    };
+    let (mut doc, informe) = pdf::componer(fuente, caras, &opciones).map_err(error)?;
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).map_err(error)?;
+    Ok((bytes, informe.avisos, informe.pdfx_identificado))
+}
+
+// ───────────────────────── Piezas sueltas ─────────────────────────
+
+#[derive(Deserialize)]
+struct PeticionNup {
+    maquina: Maquina,
+    formato: Tamano,
+    paginas: usize,
+    #[serde(default)]
+    pliego: Option<Tamano>,
+    #[serde(default = "tres")]
+    rebase: f64,
+    #[serde(default)]
+    calle: f64,
+    #[serde(default = "auto")]
+    orientacion: Orientacion,
+    #[serde(default)]
+    dorso: bool,
+    #[serde(default = "lateral")]
+    volteo: Volteo,
+    #[serde(default = "por_defecto_verdadero")]
+    marcas: bool,
+    #[serde(default = "por_defecto_verdadero")]
+    tira_color: bool,
+    #[serde(default)]
+    titulo: String,
+    #[serde(default)]
+    fecha: u64,
+}
+
+fn tres() -> f64 {
+    3.0
+}
+
+fn auto() -> Orientacion {
+    Orientacion::Auto
+}
+
+fn lateral() -> Volteo {
+    Volteo::Lateral
+}
+
+#[derive(Serialize)]
+struct InformeNup<'a> {
+    distribucion: &'a Distribucion,
+    pliego: Tamano,
+    caras: &'a [Cara],
+    avisos: Vec<String>,
+    pdfx: bool,
+}
+
+fn plan_nup(p: &PeticionNup) -> R<(ParametrosNup, Distribucion, Vec<Cara>)> {
+    if p.dorso && !p.paginas.is_multiple_of(2) {
+        return Err(error("con frente y dorso el PDF debe tener un número par de páginas"));
+    }
+    let mut margenes = Margenes::de_maquina(&p.maquina);
+    if p.dorso && !p.maquina.duplex {
+        margenes = margenes.para_volteo(p.volteo);
+    }
+    let parametros = ParametrosNup {
+        pliego: pliego(&p.maquina, p.pliego)?,
+        margenes,
+        pieza: p.formato,
+        rebase: p.rebase,
+        calle: p.calle,
+        orientacion: p.orientacion,
+        marcas: marcas(p.marcas, p.tira_color),
+    };
+    let d = nup::calcular(&parametros).map_err(error)?;
+    let caras = nup::caras_trabajo(&parametros, &d, p.paginas, p.dorso.then_some(p.volteo));
+    Ok((parametros, d, caras))
+}
+
+#[wasm_bindgen]
+pub fn planear_nup(peticion: &str) -> R<String> {
+    let p: PeticionNup = serde_json::from_str(peticion).map_err(error)?;
+    let (par, d, caras) = plan_nup(&p)?;
+    let avisos = caras.iter().flat_map(|c| c.marcas.avisos.clone()).collect();
+    serde_json::to_string(&InformeNup { distribucion: &d, pliego: par.pliego, caras: &caras, avisos, pdfx: false })
+        .map_err(error)
+}
+
+#[wasm_bindgen]
+pub fn generar_nup(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    let mut p: PeticionNup = serde_json::from_str(peticion).map_err(error)?;
+    let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
+    let (formato, mut avisos) = fuente.formato_comun(Some(p.formato), p.rebase).map_err(error)?;
+    p.formato = formato;
+    p.paginas = fuente.paginas.len();
+    let (par, d, caras) = plan_nup(&p)?;
+    let s = &p.maquina.salida;
+    let (bytes, mas, pdfx) = escribir(fuente, &caras, s.pdfx, s.condicion.clone(), icc, &p.titulo, p.fecha)?;
+    avisos.extend(mas);
+    let informe =
+        serde_json::to_string(&InformeNup { distribucion: &d, pliego: par.pliego, caras: &caras, avisos, pdfx })
+            .map_err(error)?;
+    Ok(Resultado { pdf: bytes, informe })
+}
+
+// ───────────────────────── Libros y revistas ─────────────────────────
+
+#[derive(Deserialize)]
+struct PeticionLibro {
+    maquina: Maquina,
+    formato: Tamano,
+    paginas: u32,
+    encuadernacion: Encuadernacion,
+    #[serde(default)]
+    firma: Option<u32>,
+    #[serde(default)]
+    pliego: Option<Tamano>,
+    #[serde(default = "tres")]
+    rebase: f64,
+    #[serde(default = "tres")]
+    fresado: f64,
+    #[serde(default = "tres")]
+    refile: f64,
+    /// Calibre del papel de la tripa en micras.
+    #[serde(default)]
+    calibre_um: Option<f64>,
+    #[serde(default)]
+    derecha_a_izquierda: bool,
+    #[serde(default = "por_defecto_verdadero")]
+    marcas: bool,
+    #[serde(default = "por_defecto_verdadero")]
+    tira_color: bool,
+    #[serde(default)]
+    titulo: String,
+    #[serde(default)]
+    fecha: u64,
+}
+
+#[derive(Serialize)]
+struct InformeLibro<'a> {
+    plan: &'a PlanLibro,
+    pliego: Tamano,
+    /// Lomo del bloque (sin portada) si se conoce el calibre.
+    lomo: Option<f64>,
+    avisos: Vec<String>,
+    pdfx: bool,
+}
+
+fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)> {
+    let parametros = ParametrosLibro {
+        pliego: pliego(&p.maquina, p.pliego)?,
+        margenes: Margenes::de_maquina(&p.maquina),
+        pagina: p.formato,
+        paginas: p.paginas,
+        encuadernacion: p.encuadernacion,
+        firma: p.firma,
+        rebase: p.rebase,
+        fresado: p.fresado,
+        refile: p.refile,
+        calibre_mm: p.calibre_um.map(|c| c / 1000.0),
+        derecha_a_izquierda: p.derecha_a_izquierda,
+        marcas: marcas(p.marcas, p.tira_color),
+    };
+    let plan = firmas::planificar(&parametros).map_err(error)?;
+    let lomo = p.calibre_um.map(|c| f64::from(plan.paginas_libro / 2) * c / 1000.0);
+    Ok((parametros, plan, lomo))
+}
+
+#[wasm_bindgen]
+pub fn planear_libro(peticion: &str) -> R<String> {
+    let p: PeticionLibro = serde_json::from_str(peticion).map_err(error)?;
+    let (par, plan, lomo) = plan_libro(&p)?;
+    let mut avisos = plan.avisos.clone();
+    avisos.extend(plan.caras.iter().flat_map(|c| c.marcas.avisos.clone()));
+    serde_json::to_string(&InformeLibro { plan: &plan, pliego: par.pliego, lomo, avisos, pdfx: false }).map_err(error)
+}
+
+#[wasm_bindgen]
+pub fn generar_libro(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    let mut p: PeticionLibro = serde_json::from_str(peticion).map_err(error)?;
+    let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
+    let (formato, mut avisos) = fuente.formato_comun(Some(p.formato), p.rebase).map_err(error)?;
+    p.formato = formato;
+    p.paginas = fuente.paginas.len() as u32;
+    let (par, plan, lomo) = plan_libro(&p)?;
+    avisos.extend(plan.avisos.iter().cloned());
+    let s = &p.maquina.salida;
+    let (bytes, mas, pdfx) = escribir(fuente, &plan.caras, s.pdfx, s.condicion.clone(), icc, &p.titulo, p.fecha)?;
+    avisos.extend(mas);
+    let informe =
+        serde_json::to_string(&InformeLibro { plan: &plan, pliego: par.pliego, lomo, avisos, pdfx }).map_err(error)?;
+    Ok(Resultado { pdf: bytes, informe })
+}
+
+// ───────────────────────── Portada ─────────────────────────
+
+#[derive(Deserialize)]
+struct PeticionPortada {
+    formato: Tamano,
+    /// Lomo indicado; si falta se calcula con páginas y calibres.
+    #[serde(default)]
+    lomo: Option<f64>,
+    #[serde(default)]
+    paginas: Option<u32>,
+    #[serde(default)]
+    calibre_um: Option<f64>,
+    #[serde(default)]
+    calibre_portada_um: Option<f64>,
+    tipo: TipoPortada,
+    #[serde(default = "tres")]
+    rebase: f64,
+    #[serde(default)]
+    derecha_a_izquierda: bool,
+    #[serde(default = "por_defecto_verdadero")]
+    marcas: bool,
+    /// Qué es cada página del PDF al armar: "tapa", "contratapa", "lomo"…
+    #[serde(default)]
+    orden: Vec<TipoPanel>,
+    #[serde(default)]
+    titulo: String,
+    #[serde(default)]
+    fecha: u64,
+    #[serde(default)]
+    maquina: Option<Maquina>,
+}
+
+fn calcular_portada(p: &PeticionPortada) -> R<Portada> {
+    let lomo_bloque = match p.lomo {
+        Some(l) => l,
+        None => {
+            let paginas = p.paginas.ok_or_else(|| error("indique el lomo o las páginas"))?;
+            let calibre = p.calibre_um.ok_or_else(|| error("indique el lomo o el calibre del papel"))?;
+            let hojas = f64::from(paginas.div_ceil(2));
+            let cubierta = match p.tipo {
+                TipoPortada::Rustica { .. } => 2.0 * p.calibre_portada_um.unwrap_or(0.0),
+                TipoPortada::TapaDura { .. } => 0.0,
+            };
+            (hojas * calibre + cubierta) / 1000.0
+        }
+    };
+    portada::calcular(&ParametrosPortada {
+        pagina: p.formato,
+        lomo_bloque,
+        tipo: p.tipo,
+        rebase: p.rebase,
+        derecha_a_izquierda: p.derecha_a_izquierda,
+    })
+    .map_err(error)
+}
+
+#[wasm_bindgen]
+pub fn calcular_portada_json(peticion: &str) -> R<String> {
+    let p: PeticionPortada = serde_json::from_str(peticion).map_err(error)?;
+    serde_json::to_string(&calcular_portada(&p)?).map_err(error)
+}
+
+#[wasm_bindgen]
+pub fn plantilla_portada(peticion: &str) -> R<Resultado> {
+    let p: PeticionPortada = serde_json::from_str(peticion).map_err(error)?;
+    let c = calcular_portada(&p)?;
+    let titulo = format!(
+        "Portada {} × {} mm · lomo {} mm",
+        pdf::mm_es(c.tamano.ancho),
+        pdf::mm_es(c.tamano.alto),
+        pdf::mm_es(c.lomo)
+    );
+    let nota =
+        format!("{} · rebase {} mm", if p.titulo.is_empty() { "Montajes" } else { &p.titulo }, pdf::mm_es(c.rebase));
+    let mut doc = pdf::documento_plantilla_portada(&c, &titulo, &nota);
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).map_err(error)?;
+    Ok(Resultado { pdf: bytes, informe: serde_json::to_string(&c).map_err(error)? })
+}
+
+#[wasm_bindgen]
+pub fn armar_portada(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    let p: PeticionPortada = serde_json::from_str(peticion).map_err(error)?;
+    let c = calcular_portada(&p)?;
+    let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
+    let op = marcas(p.marcas, false);
+    let primera = fuente.paginas[0].tamano_corte();
+    let completa = fuente.paginas.len() == 1
+        && (primera.ancho - c.tamano.ancho).abs() <= 0.5
+        && (primera.alto - c.tamano.alto).abs() <= 0.5;
+    let cara = if completa {
+        portada::cara_completa(&c, 0, &op)
+    } else {
+        if matches!(p.tipo, TipoPortada::TapaDura { .. }) {
+            return Err(error(format!(
+                "en tapa dura el forro va en una sola página de {} × {} mm (use la plantilla)",
+                pdf::mm_es(c.tamano.ancho),
+                pdf::mm_es(c.tamano.alto)
+            )));
+        }
+        if fuente.paginas.len() > p.orden.len() {
+            return Err(error(format!(
+                "el PDF tiene {} páginas y el orden nombra {}",
+                fuente.paginas.len(),
+                p.orden.len()
+            )));
+        }
+        let asignacion: Vec<_> =
+            fuente.paginas.iter().enumerate().map(|(i, pg)| (p.orden[i], i, pg.tamano_corte())).collect();
+        portada::cara_armada(&c, &asignacion, &op).map_err(error)?
+    };
+    let (pdfx, condicion) =
+        p.maquina.as_ref().map_or((VersionPdfx::X4, None), |m| (m.salida.pdfx, m.salida.condicion.clone()));
+    let (bytes, avisos, identificado) = escribir(fuente, &[cara], pdfx, condicion, icc, &p.titulo, p.fecha)?;
+    #[derive(Serialize)]
+    struct InformePortada<'a> {
+        portada: &'a Portada,
+        completa: bool,
+        avisos: Vec<String>,
+        pdfx: bool,
+    }
+    let informe =
+        serde_json::to_string(&InformePortada { portada: &c, completa, avisos, pdfx: identificado }).map_err(error)?;
+    Ok(Resultado { pdf: bytes, informe })
+}
+
+/// Lomo de un libro al lomo (para el asistente rápido).
+#[wasm_bindgen]
+pub fn calcular_lomo(paginas: u32, calibre_um: f64, calibre_portada_um: f64) -> R<f64> {
+    let papel = |c: f64| montajes_core::catalogo::Papel {
+        id: "p".into(),
+        nombre: String::new(),
+        gramaje: 1.0,
+        calibre_um: c,
+        estucado: false,
+        fibra: None,
+        pliegos: vec![],
+        notas: String::new(),
+    };
+    let tripa = papel(calibre_um);
+    let cubierta = (calibre_portada_um > 0.0).then(|| papel(calibre_portada_um));
+    libro::calcular_lomo(paginas.div_ceil(2) * 2, &tripa, cubierta.as_ref(), 0.0)
+        .map(|c| c.lomo_mm)
+        .map_err(|e: Error| error(e))
+}

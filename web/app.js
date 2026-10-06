@@ -1,0 +1,904 @@
+// Montajes · interfaz web. El motor (Rust → WebAssembly) hace todo el cálculo
+// y escribe los PDF; aquí solo se piden datos, se dibuja la vista previa y se
+// guardan los catálogos en el navegador.
+
+import iniciarMotor, * as motor from "./motor/montajes_web.js";
+
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const mm = (v, d = 1) => (Math.round(v * 10 ** d) / 10 ** d).toLocaleString("es-CO", { maximumFractionDigits: d });
+const num = (v, def = 0) => { const n = parseFloat(String(v).replace(",", ".")); return Number.isFinite(n) ? n : def; };
+const ahora = () => Math.floor(Date.now() / 1000);
+
+// ───────────── Almacenamiento ─────────────
+const almacen = {
+  leer(clave, defecto) { try { const v = localStorage.getItem("montajes:" + clave); return v ? JSON.parse(v) : defecto; } catch { return defecto; } },
+  guardar(clave, valor) { try { localStorage.setItem("montajes:" + clave, JSON.stringify(valor)); } catch { avisar("No se pudo guardar en este navegador"); } },
+};
+
+// Perfiles ICC en IndexedDB (pueden pesar más de lo que admite localStorage).
+const iccDB = {
+  abrir() {
+    return new Promise((ok, mal) => {
+      const r = indexedDB.open("montajes", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("icc");
+      r.onsuccess = () => ok(r.result);
+      r.onerror = () => mal(r.error);
+    });
+  },
+  async poner(id, bytes) { const db = await this.abrir(); return new Promise((ok, mal) => { const t = db.transaction("icc", "readwrite"); t.objectStore("icc").put(bytes, id); t.oncomplete = ok; t.onerror = () => mal(t.error); }); },
+  async leer(id) {
+    try { const db = await this.abrir(); return await new Promise((ok) => { const r = db.transaction("icc").objectStore("icc").get(id); r.onsuccess = () => ok(r.result || null); r.onerror = () => ok(null); }); }
+    catch { return null; }
+  },
+  async borrar(id) { try { const db = await this.abrir(); db.transaction("icc", "readwrite").objectStore("icc").delete(id); } catch { /* sin almacenamiento */ } },
+};
+
+const estado = {
+  maquinas: almacen.leer("maquinas", []),
+  papeles: almacen.leer("papeles", []),
+  preferencias: almacen.leer("preferencias", {}),
+  piezas: { archivo: null, info: null, plan: null, error: null, cara: 0, op: { rebase: 3, calle: 0, orientacion: "auto", dorso: false, volteo: "lateral", marcas: true, tira: true } },
+  libro: { archivo: null, info: null, plan: null, error: null, cara: 0, op: { encuadernacion: "lomo", firma: "auto", rebase: 3, fresado: 3, refile: 3, rtl: false, marcas: true, tira: true, creep: true } },
+  portada: { archivo: null, info: null, calculo: null, error: null, op: { ancho: 148, alto: 210, paginas: 240, lomo: "", tipo: "rustica", solapa: 0, carton: 2.5, escuadra: 3, vuelta: 15, bisagra: 8, rebase: 3, rtl: false, orden: ["tapa", "contratapa", "lomo", "solapa_tapa", "solapa_contratapa"] } },
+};
+
+function guardarCatalogos() {
+  almacen.guardar("maquinas", estado.maquinas);
+  almacen.guardar("papeles", estado.papeles);
+}
+function preferir(clave, valor) { estado.preferencias[clave] = valor; almacen.guardar("preferencias", estado.preferencias); }
+
+let temporizadorAviso;
+function avisar(texto) {
+  const a = $("#aviso");
+  a.textContent = texto;
+  a.classList.add("visible");
+  clearTimeout(temporizadorAviso);
+  temporizadorAviso = setTimeout(() => a.classList.remove("visible"), 3200);
+}
+
+function descargar(bytes, nombre) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: nombre });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+const base = (nombre) => (nombre || "montaje").replace(/\.pdf$/i, "");
+// Deja pintar la interfaz antes de un cálculo pesado.
+const respirar = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+
+// ───────────── Formas (íconos de producto, como en dormi) ─────────────
+const formas = {
+  estrella: (c) => `<svg class="forma" viewBox="0 0 56 56" aria-hidden="true"><path fill="${c}" d="M28 2l6.5 14.3L50 12l-4.3 15.5L56 28l-10.3 0.5L50 44l-15.5-4.3L28 54l-6.5-14.3L6 44l4.3-15.5L0 28l10.3-.5L6 12l15.5 4.3z"/></svg>`,
+  flor: (c) => `<svg class="forma" viewBox="0 0 56 56" aria-hidden="true"><path fill="${c}" d="M28 4c5 0 8 4 8 9 4-3 9-3 12 1s1 9-3 11c4 2 6 7 3 11s-8 4-12 1c0 5-3 9-8 9s-8-4-8-9c-4 3-9 3-12-1s-1-9 3-11C7 23 5 18 8 14s8-4 12-1c0-5 3-9 8-9z"/></svg>`,
+  circulo: (c) => `<svg class="forma" viewBox="0 0 56 56" aria-hidden="true"><circle cx="28" cy="28" r="26" fill="${c}"/></svg>`,
+  cuadro: (c) => `<svg class="forma" viewBox="0 0 56 56" aria-hidden="true"><rect x="3" y="3" width="50" height="50" rx="16" fill="${c}"/></svg>`,
+  destello: (c) => `<svg class="forma" viewBox="0 0 56 56" aria-hidden="true"><path fill="${c}" d="M28 0c2 14 8 24 28 28-20 4-26 14-28 28-2-14-8-24-28-28C20 24 26 14 28 0z"/></svg>`,
+};
+
+// ───────────── Navegación ─────────────
+const vistas = { inicio: vistaInicio, piezas: vistaPiezas, libro: vistaLibro, portada: vistaPortada, catalogos: vistaCatalogos };
+function navegar() {
+  const nombre = location.hash.slice(1) || "inicio";
+  const vista = vistas[nombre] || vistaInicio;
+  $$(".nav a").forEach((a) => a.classList.toggle("activa", a.dataset.vista === nombre));
+  const main = $("#vista");
+  main.innerHTML = "";
+  vista(main);
+  main.focus({ preventScroll: true });
+  window.scrollTo({ top: 0 });
+}
+
+// ───────────── Inicio ─────────────
+function vistaInicio(main) {
+  const hora = new Date().getHours();
+  const saludo = hora < 12 ? "Buenos días" : hora < 19 ? "Buenas tardes" : "Buenas noches";
+  const productos = [
+    ["piezas", formas.estrella("var(--naranja)"), "Volantes y tarjetas", "Cuántas caben por pliego, tiro y retiro, marcas y tira de color."],
+    ["libro", formas.flor("var(--azul)"), "Revistas a caballete", "Firmas anidadas con creep calculado según el papel."],
+    ["libro", formas.cuadro("var(--lavanda)"), "Libros al lomo o cosidos", "Firmas alzadas, fresado y marcas de alzado en escalera."],
+    ["portada", formas.circulo("var(--lima)"), "Portadas", "Lomo automático, solapas, tapa dura y plantilla para el diseñador."],
+  ];
+  main.innerHTML = `
+    <section class="hero">
+      <span class="orbe" aria-hidden="true"></span>
+      <p class="tenue">${saludo}</p>
+      <h1>¿Qué vas a<br><span class="serif">imprimir</span> hoy?</h1>
+      <p class="lead">Sube el PDF, elige la máquina y descarga el <span class="resaltado">PDF listo para imprimir</span>, con marcas, rebase y cálculos de la industria.</p>
+      <div class="acciones">
+        <a class="boton" href="#piezas">Montar piezas</a>
+        <a class="boton boton-claro" href="#libro">Montar un libro</a>
+      </div>
+    </section>
+    <section class="rejilla productos">
+      ${productos.map(([v, forma, t, d]) => `
+        <a class="tarjeta producto" href="#${v}">${forma}<h3>${t}</h3><p>${d}</p><span class="ir">Empezar →</span></a>`).join("")}
+    </section>
+    <section class="tarjeta estado-catalogo">
+      <div class="cifras">
+        <div class="cifra"><b class="num">${estado.maquinas.length}</b><span>máquinas</span></div>
+        <div class="cifra"><b class="num">${estado.papeles.length}</b><span>papeles</span></div>
+      </div>
+      <div>
+        <p style="max-width:440px">${estado.maquinas.length ? "Tus máquinas y papeles se guardan en este navegador. Puedes exportarlos para usarlos en otro equipo." : "Empieza creando las máquinas del taller: tamaño de pliego, pinza y márgenes. Se guardan para siempre."}</p>
+        <a class="boton ${estado.maquinas.length ? "boton-claro" : "boton-naranja"}" style="margin-top:14px" href="#catalogos">${estado.maquinas.length ? "Ver catálogos" : "Crear mi primera máquina"}</a>
+      </div>
+    </section>`;
+}
+
+// ───────────── Componentes compartidos ─────────────
+function selectorMaquina(id) {
+  if (!estado.maquinas.length) {
+    return `<div class="error-caja">Aún no hay máquinas. <a href="#catalogos">Crea una en Catálogos</a> para continuar.</div>`;
+  }
+  const elegida = estado.preferencias.maquina;
+  return `<label class="campo"><span>Máquina</span>
+    <select id="${id}">${estado.maquinas.map((m) => `<option value="${esc(m.id)}" ${m.id === elegida ? "selected" : ""}>${esc(m.nombre)} · ${mm(m.pliego_max.ancho, 0)}×${mm(m.pliego_max.alto, 0)}</option>`).join("")}</select></label>`;
+}
+const maquinaElegida = (id) => estado.maquinas.find((m) => m.id === ($(`#${id}`)?.value ?? estado.preferencias.maquina)) || estado.maquinas[0];
+
+function zonaArchivo(id, texto) {
+  return `<label class="soltar" id="${id}-zona">
+      <span class="orbe" aria-hidden="true"></span>
+      <b>${texto}</b><span class="tenue">o arrástralo aquí</span>
+      <input type="file" id="${id}" accept="application/pdf,.pdf">
+    </label>`;
+}
+
+function conectarArchivo(id, alCargar) {
+  const zona = $(`#${id}-zona`);
+  const input = $(`#${id}`);
+  if (!zona) return;
+  const leer = async (archivo) => {
+    if (!archivo) return;
+    const bytes = new Uint8Array(await archivo.arrayBuffer());
+    alCargar({ nombre: archivo.name, tamano: archivo.size, bytes });
+  };
+  input.addEventListener("change", () => leer(input.files[0]));
+  zona.addEventListener("dragover", (e) => { e.preventDefault(); zona.classList.add("encima"); });
+  zona.addEventListener("dragleave", () => zona.classList.remove("encima"));
+  zona.addEventListener("drop", (e) => { e.preventDefault(); zona.classList.remove("encima"); leer(e.dataTransfer.files[0]); });
+}
+
+function tarjetaArchivo(archivo, info, idQuitar) {
+  const f = info?.formato;
+  const rebase = info ? Math.min(...info.paginas.map((p) => p.rebase)) : 0;
+  return `<div class="archivo"><span class="orbe" aria-hidden="true"></span>
+    <div><b>${esc(archivo.nombre)}</b><span>${info ? `${info.paginas.length} pág. · ${f ? `${mm(f.ancho)}×${mm(f.alto)} mm` : "tamaños mixtos"} · rebase ${mm(rebase)} mm` : "Analizando…"}</span></div>
+    <button class="boton boton-claro boton-chico" id="${idQuitar}" type="button">Cambiar</button></div>`;
+}
+
+function analizarArchivo(trabajo, archivo) {
+  trabajo.archivo = archivo;
+  trabajo.error = null;
+  trabajo.cara = 0;
+  try {
+    trabajo.info = JSON.parse(motor.analizar(archivo.bytes));
+    if (!trabajo.info.formato) trabajo.error = "Las páginas del PDF tienen tamaños distintos. Revisa que todas tengan el mismo formato final (TrimBox).";
+  } catch (e) {
+    trabajo.info = null;
+    trabajo.error = `No se pudo leer el PDF: ${e.message || e}`;
+  }
+}
+
+function chips(nombre, opciones, valor) {
+  return `<div class="chips" role="group" data-chips="${nombre}">${opciones.map(([v, t]) => `<button type="button" class="chip" data-valor="${esc(v)}" aria-pressed="${String(v) === String(valor)}">${t}</button>`).join("")}</div>`;
+}
+function conectarChips(raiz, alCambiar) {
+  $$("[data-chips]", raiz).forEach((g) => g.addEventListener("click", (e) => {
+    const b = e.target.closest(".chip");
+    if (!b) return;
+    $$(".chip", g).forEach((c) => c.setAttribute("aria-pressed", String(c === b)));
+    alCambiar(g.dataset.chips, b.dataset.valor);
+  }));
+}
+
+function interruptor(id, texto, valor) {
+  return `<label class="interruptor"><span>${texto}</span><input type="checkbox" id="${id}" ${valor ? "checked" : ""}></label>`;
+}
+
+// Solo reemplaza el contenido si cambió: así un clic en un botón no se pierde
+// cuando el campo que se estaba editando pierde el foco y recalcula.
+function pintar(caja, html) {
+  if (caja._html === html) return false;
+  caja.innerHTML = html;
+  caja._html = html;
+  return true;
+}
+
+function listaAvisos(avisos) {
+  const unicos = [...new Set(avisos || [])];
+  return unicos.length ? `<ul class="avisos">${unicos.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>` : "";
+}
+
+// ───────────── Vista previa del pliego ─────────────
+const COLORES = ["#4c9ef3", "#e4ea5b", "#ff6b2c", "#8b8cf0"];
+
+function svgCara(cara, maquina, opciones = {}) {
+  const W = cara.pliego.ancho, H = cara.pliego.alto;
+  const y = (v, h = 0) => H - v - h; // PDF (abajo-izquierda) → SVG (arriba-izquierda)
+  const r = (rc, extra = "") => `<rect x="${rc.x}" y="${y(rc.y, rc.alto)}" width="${rc.ancho}" height="${rc.alto}" ${extra}/>`;
+  const partes = [];
+  partes.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="var(--superficie)" stroke="var(--linea)" stroke-width="${W / 400}"/>`);
+  if (maquina && !cara.cajas) {
+    const a = { x: maquina.lateral, y: maquina.pinza, ancho: W - 2 * maquina.lateral, alto: H - maquina.pinza - maquina.cola };
+    partes.push(r(a, `fill="none" stroke="var(--gris)" stroke-width="${W / 700}" stroke-dasharray="${W / 120} ${W / 160}"`));
+    partes.push(`<rect x="0" y="${H - maquina.pinza}" width="${W}" height="${maquina.pinza}" fill="var(--naranja)" opacity=".12"/>`);
+    partes.push(`<text x="${W / 2}" y="${H - maquina.pinza / 2}" font-size="${Math.max(Math.min(maquina.pinza * 0.7, W / 45), 3)}" text-anchor="middle" dominant-baseline="middle" fill="var(--naranja)" font-weight="700" letter-spacing=".1em">PINZA</text>`);
+  }
+  if (cara.cajas) partes.push(r(cara.cajas.sangrado, `fill="none" stroke="#d93b2b" stroke-width="${W / 900}"`));
+  for (const u of cara.ubicaciones) {
+    const color = COLORES[u.pagina % COLORES.length];
+    partes.push(r(u.recorte, `fill="${color}" opacity=".28"`));
+    partes.push(r(u.corte, `fill="${color}" fill-opacity=".55" stroke="var(--tinta)" stroke-width="${W / 900}"`));
+    if (opciones.numeros !== false) {
+      const cx = u.corte.x + u.corte.ancho / 2, cy = y(u.corte.y + u.corte.alto / 2);
+      const t = Math.min(u.corte.ancho, u.corte.alto) * 0.42;
+      // Número de página girado como va impreso; la barra marca la cabeza.
+      partes.push(`<g transform="rotate(${u.giro} ${cx} ${cy})"><text x="${cx}" y="${cy}" font-size="${t}" font-weight="800" text-anchor="middle" dominant-baseline="central" fill="var(--tinta)">${u.pagina + 1}</text>
+        <rect x="${cx - t * 0.5}" y="${cy - t * 0.95}" width="${t}" height="${t * 0.09}" rx="${t * 0.04}" fill="var(--tinta)"/></g>`);
+    }
+  }
+  const m = cara.marcas;
+  const trazo = W / 1000;
+  for (const l of m.corte) partes.push(`<line x1="${l.x1}" y1="${y(l.y1)}" x2="${l.x2}" y2="${y(l.y2)}" stroke="var(--tinta)" stroke-width="${trazo * 1.2}"/>`);
+  for (const l of m.pliegues || []) partes.push(`<line x1="${l.x1}" y1="${y(l.y1)}" x2="${l.x2}" y2="${y(l.y2)}" stroke="#c03ac0" stroke-width="${trazo * 1.5}" stroke-dasharray="${W / 300}"/>`);
+  for (const g of m.registro) partes.push(`<g stroke="var(--tinta)" stroke-width="${trazo}" fill="none"><circle cx="${g.x}" cy="${y(g.y)}" r="${g.radio * 0.6}"/><line x1="${g.x - g.radio}" y1="${y(g.y)}" x2="${g.x + g.radio}" y2="${y(g.y)}"/><line x1="${g.x}" y1="${y(g.y) - g.radio}" x2="${g.x}" y2="${y(g.y) + g.radio}"/></g>`);
+  for (const p of m.tira_color) {
+    const [c, mg, a, k] = p.cmyk;
+    const rgb = [(1 - c) * (1 - k), (1 - mg) * (1 - k), (1 - a) * (1 - k)].map((v) => Math.round(v * 255));
+    partes.push(r(p.rect, `fill="rgb(${rgb})"`));
+  }
+  for (const a of m.alzado || []) partes.push(r(a, `fill="var(--tinta)"`));
+  return `<svg viewBox="${-W * 0.01} ${-H * 0.01} ${W * 1.02} ${H * 1.02}" role="img" aria-label="${esc(cara.nombre)}: pliego de ${mm(W, 0)} por ${mm(H, 0)} mm">${partes.join("")}</svg>`;
+}
+
+function tarjetaVistaPrevia(trabajo, maquina, titulo) {
+  const caras = trabajo.plan?.caras || trabajo.plan?.plan?.caras;
+  if (!caras?.length) {
+    return `<section class="tarjeta vista-previa"><div class="lienzo"><div class="vacio"><span class="orbe orbe-respira" aria-hidden="true"></span><p>${titulo}</p></div></div></section>`;
+  }
+  const i = Math.min(trabajo.cara, caras.length - 1);
+  const muchas = caras.length > 14;
+  return `<section class="tarjeta vista-previa">
+    <div class="vista-previa-cabeza">
+      <h3>${esc(caras[i].nombre)} <span class="tenue num">· ${i + 1} de ${caras.length}</span></h3>
+      <div class="paginador">
+        <button class="boton boton-claro boton-chico" data-cara="${i - 1}" ${i === 0 ? "disabled" : ""} aria-label="Pliego anterior">←</button>
+        ${muchas ? "" : caras.map((_, k) => `<button class="chip" data-cara="${k}" aria-pressed="${k === i}">${k + 1}</button>`).join("")}
+        <button class="boton boton-claro boton-chico" data-cara="${i + 1}" ${i === caras.length - 1 ? "disabled" : ""} aria-label="Pliego siguiente">→</button>
+      </div>
+    </div>
+    <div class="lienzo">${svgCara(caras[i], maquina)}</div>
+    <div class="leyenda"><span><i style="border-color:var(--tinta)"></i>Corte</span><span><i style="border-color:#c03ac0;border-top-style:dashed"></i>Pliegue</span><span><i style="border-color:var(--gris);border-top-style:dashed"></i>Área imprimible</span><span><i style="border-color:var(--naranja)"></i>Pinza</span></div>
+  </section>`;
+}
+
+function conectarPaginador(raiz, trabajo, redibujar) {
+  $$("[data-cara]", raiz).forEach((b) => b.addEventListener("click", () => { trabajo.cara = Number(b.dataset.cara); redibujar(); }));
+}
+
+// ───────────── Piezas sueltas (n-up) ─────────────
+function vistaPiezas(main) {
+  const t = estado.piezas;
+  const o = t.op;
+  main.innerHTML = `
+    <div class="encabezado"><div><h1>Volantes y <span class="serif">tarjetas</span></h1><p>Repite la pieza en el pliego con el mejor aprovechamiento. Para varias páginas, cada una va en su propio pliego.</p></div></div>
+    <div class="trabajo">
+      <div class="panel">
+        <section class="tarjeta paso ${t.info ? "listo" : ""}">
+          <div class="paso-titulo"><span class="paso-num">1</span><h3>Archivo</h3></div>
+          ${t.archivo ? tarjetaArchivo(t.archivo, t.info, "pz-cambiar") : zonaArchivo("pz-archivo", "Sube el PDF de la pieza")}
+        </section>
+        <section class="tarjeta paso">
+          <div class="paso-titulo"><span class="paso-num">2</span><h3>Montaje</h3></div>
+          ${selectorMaquina("pz-maquina")}
+          <div class="fila">
+            <label class="campo"><span>Rebase (mm)</span><input type="number" step="0.5" min="0" id="pz-rebase" value="${o.rebase}"></label>
+            <label class="campo"><span>Calle (mm)</span><input type="number" step="0.5" min="0" id="pz-calle" value="${o.calle}"><small>0 = corte compartido</small></label>
+          </div>
+          <div class="campo"><span>Orientación</span>${chips("orientacion", [["auto", "Automática"], ["normal", "Normal"], ["girada", "Girada 90°"]], o.orientacion)}</div>
+          ${interruptor("pz-dorso", "Frente y dorso (páginas en pares)", o.dorso)}
+          ${o.dorso ? `<div class="campo"><span>Volteo del pliego</span>${chips("volteo", [["lateral", "Tira y retira (lateral)"], ["cabeza", "De cabeza (tumble)"]], o.volteo)}</div>` : ""}
+          <details class="avanzado"><summary>Marcas y pliego</summary>
+            <div class="paso">
+              ${interruptor("pz-marcas", "Marcas de corte y registro", o.marcas)}
+              ${interruptor("pz-tira", "Tira de control de color", o.tira)}
+              <div class="fila">
+                <label class="campo"><span>Pliego ancho</span><input type="number" id="pz-pliego-ancho" placeholder="máx." value="${o.pliegoAncho ?? ""}"></label>
+                <label class="campo"><span>Pliego alto</span><input type="number" id="pz-pliego-alto" placeholder="máx." value="${o.pliegoAlto ?? ""}"></label>
+              </div>
+            </div>
+          </details>
+        </section>
+      </div>
+      <div class="resultado" id="pz-resultado"></div>
+    </div>`;
+
+  conectarArchivo("pz-archivo", (a) => { analizarArchivo(t, a); vistaPiezas(main); });
+  $("#pz-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaPiezas(main); });
+  const leerOpciones = () => {
+    o.rebase = num($("#pz-rebase").value, 3);
+    o.calle = num($("#pz-calle").value, 0);
+    o.dorso = $("#pz-dorso").checked;
+    o.marcas = $("#pz-marcas").checked;
+    o.tira = $("#pz-tira").checked;
+    o.pliegoAncho = $("#pz-pliego-ancho").value || null;
+    o.pliegoAlto = $("#pz-pliego-alto").value || null;
+    if ($("#pz-maquina")) preferir("maquina", $("#pz-maquina").value);
+  };
+  $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
+    if (el.type === "file") return;
+    const antes = o.dorso;
+    leerOpciones();
+    if (antes !== o.dorso) vistaPiezas(main); else calcularPiezas();
+  }));
+  conectarChips(main, (n, v) => { o[n] = v; calcularPiezas(); });
+  calcularPiezas();
+}
+
+function peticionPiezas(maquina, info, orientacion) {
+  const o = estado.piezas.op;
+  const pliego = o.pliegoAncho && o.pliegoAlto ? { ancho: num(o.pliegoAncho), alto: num(o.pliegoAlto) } : null;
+  return {
+    maquina, formato: info.formato, paginas: info.paginas.length, pliego,
+    rebase: o.rebase, calle: o.calle, orientacion: orientacion || o.orientacion,
+    dorso: o.dorso, volteo: o.volteo, marcas: o.marcas, tira_color: o.tira,
+    titulo: base(estado.piezas.archivo?.nombre), fecha: ahora(),
+  };
+}
+
+function calcularPiezas() {
+  const t = estado.piezas;
+  const caja = $("#pz-resultado");
+  if (!caja) return;
+  const maquina = maquinaElegida("pz-maquina");
+  t.plan = null;
+  let explicacion = "";
+  if (t.info?.formato && maquina && !t.error) {
+    try {
+      t.plan = JSON.parse(motor.planear_nup(JSON.stringify(peticionPiezas(maquina, t.info))));
+      const d = t.plan.distribucion;
+      if (t.op.orientacion === "auto" && d.girada) {
+        try {
+          const normal = JSON.parse(motor.planear_nup(JSON.stringify(peticionPiezas(maquina, t.info, "normal"))));
+          explicacion = `Giré la pieza <span class="resaltado">90°</span> porque así caben <b>${d.columnas * d.filas}</b> en vez de ${normal.distribucion.columnas * normal.distribucion.filas}.`;
+        } catch { explicacion = `Giré la pieza <span class="resaltado">90°</span>: sin girar no cabe ninguna.`; }
+      } else {
+        explicacion = `Van <span class="resaltado">${d.columnas} columnas × ${d.filas} filas</span>${t.op.calle > 0 ? `, con ${mm(t.op.calle)} mm de calle` : ", con corte compartido"}.`;
+      }
+    } catch (e) { t.error = String(e.message || e); }
+  }
+  const d = t.plan?.distribucion;
+  const html = `
+    ${t.error ? `<div class="error-caja">${esc(t.error)}</div>` : ""}
+    ${d ? `<section class="tarjeta-oscura">
+      <div class="metricas">
+        <div class="metrica"><b>${d.columnas * d.filas}</b><span>piezas por pliego</span></div>
+        <div class="metrica"><b>${mm(d.aprovechamiento, 0)}%</b><span>aprovechamiento</span></div>
+        <div class="metrica"><b>${t.plan.caras.length}</b><span>${t.plan.caras.length === 1 ? "pliego" : "pliegos"} en el PDF</span></div>
+      </div>
+      <p class="explicacion" style="margin-top:20px">${explicacion}</p>
+      <div class="acciones-resultado" style="margin-top:20px"><button class="boton boton-blanco" id="pz-generar" type="button">Descargar PDF listo para imprimir</button></div>
+    </section>` : ""}
+    ${listaAvisos(t.plan?.avisos)}
+    ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver el pliego" : "Sube un PDF para ver el montaje")}`;
+  if (!pintar(caja, html)) return;
+  conectarPaginador(caja, t, calcularPiezas);
+  $("#pz-generar")?.addEventListener("click", async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true; b.textContent = "Generando…";
+    await respirar();
+    try {
+      const icc = (await iccDB.leer(maquina.id)) || new Uint8Array();
+      const r = motor.generar_nup(t.archivo.bytes, JSON.stringify(peticionPiezas(maquina, t.info)), icc);
+      descargar(r.pdf, `${base(t.archivo.nombre)}-montaje.pdf`);
+      const inf = JSON.parse(r.informe);
+      avisar(inf.pdfx ? "PDF listo (con perfil de salida)" : "PDF listo. Carga un perfil ICC en la máquina para identificarlo como PDF/X");
+    } catch (err) { avisar(`Error: ${err.message || err}`); }
+    b.disabled = false; b.textContent = "Descargar PDF listo para imprimir";
+  });
+}
+
+// ───────────── Libros y revistas ─────────────
+function vistaLibro(main) {
+  const t = estado.libro;
+  const o = t.op;
+  const papeles = estado.papeles;
+  const papelElegido = estado.preferencias.papelTripa;
+  main.innerHTML = `
+    <div class="encabezado"><div><h1>Libros y <span class="serif">revistas</span></h1><p>Sube el interior página por página. Se reparte en firmas, se pliega y se calcula el creep o el fresado.</p></div></div>
+    <div class="trabajo">
+      <div class="panel">
+        <section class="tarjeta paso ${t.info ? "listo" : ""}">
+          <div class="paso-titulo"><span class="paso-num">1</span><h3>Tripa (interior)</h3></div>
+          ${t.archivo ? tarjetaArchivo(t.archivo, t.info, "lb-cambiar") : zonaArchivo("lb-archivo", "Sube el PDF del interior")}
+        </section>
+        <section class="tarjeta paso">
+          <div class="paso-titulo"><span class="paso-num">2</span><h3>Encuadernación</h3></div>
+          ${chips("encuadernacion", [["caballete", "Caballete"], ["lomo", "Al lomo (PUR)"], ["cosido", "Cosido"]], o.encuadernacion)}
+          ${selectorMaquina("lb-maquina")}
+          <label class="campo"><span>Papel de la tripa</span>
+            <select id="lb-papel"><option value="">Sin papel (no calcula creep ni lomo)</option>${papeles.map((p) => `<option value="${esc(p.id)}" ${p.id === papelElegido ? "selected" : ""}>${esc(p.nombre)} · ${p.calibre_um} µm</option>`).join("")}</select>
+            ${papeles.length ? "" : `<small><a href="#catalogos">Agrega papeles</a> para calcular el lomo y el creep.</small>`}
+          </label>
+          <div class="campo"><span>Páginas por firma</span>${chips("firma", [["auto", "Auto"], ["4", "4"], ["8", "8"], ["16", "16"], ["32", "32"], ["64", "64"]], o.firma)}</div>
+          <details class="avanzado"><summary>Márgenes, lectura y marcas</summary>
+            <div class="paso">
+              <div class="fila-3">
+                <label class="campo"><span>Rebase</span><input type="number" step="0.5" min="0" id="lb-rebase" value="${o.rebase}"></label>
+                <label class="campo"><span>Refile</span><input type="number" step="0.5" min="0" id="lb-refile" value="${o.refile}"></label>
+                <label class="campo"><span>Fresado</span><input type="number" step="0.5" min="0" id="lb-fresado" value="${o.fresado}" ${o.encuadernacion !== "lomo" ? "disabled" : ""}></label>
+              </div>
+              ${interruptor("lb-creep", "Compensar creep (caballete)", o.creep)}
+              ${interruptor("lb-rtl", "Lectura de derecha a izquierda", o.rtl)}
+              ${interruptor("lb-marcas", "Marcas de corte, plegado y registro", o.marcas)}
+              ${interruptor("lb-tira", "Tira de control de color", o.tira)}
+            </div>
+          </details>
+        </section>
+      </div>
+      <div class="resultado" id="lb-resultado"></div>
+    </div>`;
+  conectarArchivo("lb-archivo", (a) => { analizarArchivo(t, a); vistaLibro(main); });
+  $("#lb-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaLibro(main); });
+  $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
+    if (el.type === "file") return;
+    o.rebase = num($("#lb-rebase").value, 3);
+    o.refile = num($("#lb-refile").value, 3);
+    o.fresado = num($("#lb-fresado").value, 3);
+    o.creep = $("#lb-creep").checked;
+    o.rtl = $("#lb-rtl").checked;
+    o.marcas = $("#lb-marcas").checked;
+    o.tira = $("#lb-tira").checked;
+    if ($("#lb-maquina")) preferir("maquina", $("#lb-maquina").value);
+    preferir("papelTripa", $("#lb-papel").value);
+    calcularLibro();
+  }));
+  conectarChips(main, (n, v) => { o[n] = v; t.cara = 0; if (n === "encuadernacion") vistaLibro(main); else calcularLibro(); });
+  calcularLibro();
+}
+
+function peticionLibro(maquina, info) {
+  const o = estado.libro.op;
+  const papel = estado.papeles.find((p) => p.id === $("#lb-papel")?.value);
+  return {
+    maquina, formato: info.formato, paginas: info.paginas.length, encuadernacion: o.encuadernacion,
+    firma: o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
+    calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
+    derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira,
+    titulo: base(estado.libro.archivo?.nombre), fecha: ahora(),
+  };
+}
+
+function calcularLibro() {
+  const t = estado.libro;
+  const caja = $("#lb-resultado");
+  if (!caja) return;
+  const maquina = maquinaElegida("lb-maquina");
+  t.plan = null;
+  if (t.info?.formato && maquina && !t.error) {
+    try { t.plan = JSON.parse(motor.planear_libro(JSON.stringify(peticionLibro(maquina, t.info)))); }
+    catch (e) { t.plan = null; caja.dataset.error = String(e.message || e); }
+  }
+  const error = t.error || (!t.plan && caja.dataset.error) || "";
+  delete caja.dataset.error;
+  const p = t.plan?.plan;
+  let composicion = "", explicacion = "";
+  if (p) {
+    const grupos = [];
+    for (const f of p.firmas) {
+      const g = grupos.at(-1);
+      if (g && g.n === f.paginas && g.girada === f.girada) g.c++; else grupos.push({ n: f.paginas, girada: f.girada, c: 1 });
+    }
+    composicion = grupos.map((g) => `${g.c} × ${g.n} pp`).join(" + ");
+    const girada = p.firmas.some((f) => f.girada);
+    const o = t.op;
+    explicacion = `${p.paginas_libro} páginas en <span class="resaltado">${composicion}</span>${girada ? ", con la firma girada 90° para que quepa en el pliego" : ""}. `;
+    explicacion += o.encuadernacion === "caballete" ? "Las firmas van anidadas una dentro de otra." : "Las firmas se alzan una tras otra" + (o.encuadernacion === "lomo" ? `, con ${mm(o.fresado)} mm de fresado en el lomo.` : ".");
+    if (p.blancas) explicacion += ` Se agregan <b>${p.blancas}</b> páginas en blanco al final.`;
+  }
+  const tercera = !p ? "" : t.op.encuadernacion === "caballete"
+    ? `<div class="metrica"><b>${mm(p.creep_max, 2)}</b><span>mm de creep (hoja central)</span></div>`
+    : `<div class="metrica"><b>${t.plan.lomo != null ? mm(t.plan.lomo) : "—"}</b><span>mm de lomo del bloque</span></div>`;
+  const html = `
+    ${error ? `<div class="error-caja">${esc(error)}</div>` : ""}
+    ${p ? `<section class="tarjeta-oscura">
+      <div class="metricas">
+        <div class="metrica"><b>${p.firmas.length}</b><span>${p.firmas.length === 1 ? "firma" : "firmas"}</span></div>
+        <div class="metrica"><b>${p.caras.length}</b><span>pliegos (tiro y retiro)</span></div>
+        ${tercera}
+      </div>
+      <p class="explicacion" style="margin-top:20px">${explicacion}</p>
+      <div class="acciones-resultado" style="margin-top:20px">
+        <button class="boton boton-blanco" id="lb-generar" type="button">Descargar pliegos</button>
+        <a class="boton boton-claro" href="#portada" id="lb-a-portada">Hacer la portada →</a>
+      </div>
+    </section>` : ""}
+    ${listaAvisos(t.plan?.avisos)}
+    ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver las firmas" : "Sube el interior para ver las firmas")}`;
+  if (!pintar(caja, html)) return;
+  conectarPaginador(caja, t, calcularLibro);
+  $("#lb-a-portada")?.addEventListener("click", () => {
+    const po = estado.portada.op;
+    po.ancho = t.info.formato.ancho; po.alto = t.info.formato.alto; po.paginas = p.paginas_libro;
+    po.rtl = t.op.rtl; po.lomo = "";
+    preferir("papelPortadaTripa", $("#lb-papel")?.value || "");
+  });
+  $("#lb-generar")?.addEventListener("click", async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true; b.textContent = "Generando…";
+    await respirar();
+    try {
+      const icc = (await iccDB.leer(maquina.id)) || new Uint8Array();
+      const r = motor.generar_libro(t.archivo.bytes, JSON.stringify(peticionLibro(maquina, t.info)), icc);
+      descargar(r.pdf, `${base(t.archivo.nombre)}-pliegos.pdf`);
+      avisar("Pliegos listos");
+    } catch (err) { avisar(`Error: ${err.message || err}`); }
+    b.disabled = false; b.textContent = "Descargar pliegos";
+  });
+}
+
+// ───────────── Portada ─────────────
+function vistaPortada(main) {
+  const t = estado.portada;
+  const o = t.op;
+  const papeles = estado.papeles;
+  const tripa = estado.preferencias.papelPortadaTripa ?? estado.preferencias.papelTripa;
+  const cubierta = estado.preferencias.papelCubierta;
+  const opcionesPapel = (sel, vacio) => `<option value="">${vacio}</option>${papeles.map((p) => `<option value="${esc(p.id)}" ${p.id === sel ? "selected" : ""}>${esc(p.nombre)} · ${p.calibre_um} µm</option>`).join("")}`;
+  main.innerHTML = `
+    <div class="encabezado"><div><h1>Portada con <span class="serif">lomo</span> exacto</h1><p>Calcula tapa, lomo, contratapa y solapas a partir de las páginas y el papel. Descarga la plantilla para el diseñador o arma la portada con sus páginas.</p></div></div>
+    <div class="trabajo">
+      <div class="panel">
+        <section class="tarjeta paso">
+          <div class="paso-titulo"><span class="paso-num">1</span><h3>El libro</h3></div>
+          <div class="fila">
+            <label class="campo"><span>Ancho (mm)</span><input type="number" id="po-ancho" value="${o.ancho}"></label>
+            <label class="campo"><span>Alto (mm)</span><input type="number" id="po-alto" value="${o.alto}"></label>
+          </div>
+          <label class="campo"><span>Páginas de la tripa</span><input type="number" id="po-paginas" value="${o.paginas}"></label>
+          <label class="campo"><span>Papel de la tripa</span><select id="po-papel">${opcionesPapel(tripa, "Elegir papel…")}</select></label>
+          <label class="campo"><span>Lomo manual (mm)</span><input type="number" step="0.1" id="po-lomo" value="${o.lomo}" placeholder="se calcula solo"><small>Déjalo vacío para calcularlo con el papel.</small></label>
+        </section>
+        <section class="tarjeta paso">
+          <div class="paso-titulo"><span class="paso-num">2</span><h3>Tipo de portada</h3></div>
+          ${chips("tipo", [["rustica", "Rústica"], ["tapa_dura", "Tapa dura"]], o.tipo)}
+          ${o.tipo === "rustica" ? `
+            <label class="campo"><span>Papel de la portada</span><select id="po-cubierta">${opcionesPapel(cubierta, "Sin sumar al lomo")}</select></label>
+            <label class="campo"><span>Solapas (mm, 0 = sin solapas)</span><input type="number" id="po-solapa" value="${o.solapa}"></label>` : `
+            <div class="fila">
+              <label class="campo"><span>Cartón (mm)</span><input type="number" step="0.1" id="po-carton" value="${o.carton}"></label>
+              <label class="campo"><span>Escuadra (mm)</span><input type="number" step="0.5" id="po-escuadra" value="${o.escuadra}"></label>
+            </div>
+            <div class="fila">
+              <label class="campo"><span>Vuelta (mm)</span><input type="number" id="po-vuelta" value="${o.vuelta}"></label>
+              <label class="campo"><span>Bisagra (mm)</span><input type="number" id="po-bisagra" value="${o.bisagra}"></label>
+            </div>`}
+          <div class="fila">
+            <label class="campo"><span>Rebase (mm)</span><input type="number" step="0.5" id="po-rebase" value="${o.rebase}"></label>
+            <div class="campo" style="align-content:end">${interruptor("po-rtl", "Derecha a izquierda", o.rtl)}</div>
+          </div>
+        </section>
+      </div>
+      <div class="resultado" id="po-resultado"></div>
+    </div>`;
+  $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
+    if (el.type === "file") return;
+    o.ancho = num($("#po-ancho").value, 148); o.alto = num($("#po-alto").value, 210);
+    o.paginas = Math.max(0, Math.round(num($("#po-paginas").value, 0)));
+    o.lomo = $("#po-lomo").value;
+    o.rebase = num($("#po-rebase").value, 3);
+    o.rtl = $("#po-rtl").checked;
+    if (o.tipo === "rustica") { o.solapa = num($("#po-solapa").value, 0); preferir("papelCubierta", $("#po-cubierta").value); }
+    else { o.carton = num($("#po-carton").value, 2.5); o.escuadra = num($("#po-escuadra").value, 3); o.vuelta = num($("#po-vuelta").value, 15); o.bisagra = num($("#po-bisagra").value, 8); }
+    preferir("papelPortadaTripa", $("#po-papel").value);
+    calcularPortada();
+  }));
+  conectarChips(main, (n, v) => { o[n] = v; vistaPortada(main); });
+  calcularPortada();
+}
+
+function peticionPortada() {
+  const o = estado.portada.op;
+  const tripa = estado.papeles.find((p) => p.id === $("#po-papel")?.value);
+  const cubierta = estado.papeles.find((p) => p.id === $("#po-cubierta")?.value);
+  return {
+    formato: { ancho: o.ancho, alto: o.alto },
+    lomo: o.lomo === "" ? null : num(o.lomo),
+    paginas: o.paginas, calibre_um: tripa?.calibre_um ?? null, calibre_portada_um: cubierta?.calibre_um ?? null,
+    tipo: o.tipo === "rustica" ? { rustica: { solapa: o.solapa } } : { tapa_dura: { carton: o.carton, escuadra: o.escuadra, vuelta: o.vuelta, bisagra: o.bisagra } },
+    rebase: o.rebase, derecha_a_izquierda: o.rtl, marcas: true, orden: o.orden,
+    titulo: tripa ? `${o.paginas} pp en ${tripa.nombre}` : "Montajes", fecha: ahora(),
+  };
+}
+
+const NOMBRES_PANEL = { solapa_contratapa: "Solapa", contratapa: "Contratapa", bisagra: "Bisagra", lomo: "Lomo", tapa: "Tapa", solapa_tapa: "Solapa", vuelta: "Vuelta" };
+function svgPortada(c) {
+  const W = c.tamano.ancho, H = c.tamano.alto, r = c.rebase;
+  const y = (v, h) => H - v - h;
+  const colores = { tapa: "#4c9ef3", contratapa: "#e4ea5b", lomo: "#ff6b2c", solapa_tapa: "#8b8cf0", solapa_contratapa: "#8b8cf0", bisagra: "#c9c8c2", vuelta: "#e3e2dc" };
+  const partes = [`<rect x="${-r}" y="${-r}" width="${W + 2 * r}" height="${H + 2 * r}" fill="none" stroke="#d93b2b" stroke-width="${W / 900}"/>`];
+  for (const p of c.paneles) {
+    const pr = p.rect;
+    partes.push(`<rect x="${pr.x}" y="${y(pr.y, pr.alto)}" width="${pr.ancho}" height="${pr.alto}" fill="${colores[p.tipo]}" fill-opacity="${p.tipo === "vuelta" ? 1 : 0.55}"/>`);
+  }
+  for (const p of c.paneles) {
+    if (p.tipo === "vuelta" || p.tipo === "bisagra") continue;
+    const pr = p.rect, cx = pr.x + pr.ancho / 2, cy = y(pr.y, pr.alto) + pr.alto / 2;
+    const fs = Math.min(W / 30, 14);
+    const vertical = pr.ancho < fs * 4;
+    partes.push(`<g transform="${vertical ? `rotate(-90 ${cx} ${cy})` : ""}"><text x="${cx}" y="${cy - fs * 0.3}" font-size="${fs}" font-weight="700" text-anchor="middle" fill="#111">${NOMBRES_PANEL[p.tipo]}</text><text x="${cx}" y="${cy + fs * 0.9}" font-size="${fs * 0.75}" text-anchor="middle" fill="#111">${mm(pr.ancho, 2)} mm</text></g>`);
+  }
+  for (const x of c.pliegues) partes.push(`<line x1="${x}" y1="${-r}" x2="${x}" y2="${H + r}" stroke="#c03ac0" stroke-width="${W / 700}" stroke-dasharray="${W / 150}"/>`);
+  for (const v of c.pliegues_horizontales || []) partes.push(`<line x1="${-r}" y1="${H - v}" x2="${W + r}" y2="${H - v}" stroke="#c03ac0" stroke-width="${W / 700}" stroke-dasharray="${W / 150}"/>`);
+  partes.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="none" stroke="#111" stroke-width="${W / 700}"/>`);
+  const m = r + W * 0.01;
+  return `<svg viewBox="${-m} ${-m} ${W + 2 * m} ${H + 2 * m}" role="img" aria-label="Portada extendida de ${mm(W)} por ${mm(H)} mm">${partes.join("")}</svg>`;
+}
+
+function calcularPortada() {
+  const t = estado.portada;
+  const caja = $("#po-resultado");
+  if (!caja) return;
+  let c = null, error = "";
+  try { c = JSON.parse(motor.calcular_portada_json(JSON.stringify(peticionPortada()))); }
+  catch (e) { error = String(e.message || e); }
+  t.calculo = c;
+  const paneles = c ? c.paneles.filter((p) => p.tipo !== "vuelta" || p.rect.alto >= c.tamano.alto - 0.001) : [];
+  const html = `
+    ${error ? `<div class="error-caja">${esc(error.includes("calibre") || error.includes("páginas") ? "Elige el papel de la tripa (o escribe el lomo a mano) para calcular la portada." : error)}</div>` : ""}
+    ${c ? `<section class="tarjeta-oscura">
+      <div class="metricas">
+        <div class="metrica"><b>${mm(c.lomo, 2)}</b><span>mm de lomo</span></div>
+        <div class="metrica"><b>${mm(c.tamano.ancho, 1)}</b><span>mm de ancho total</span></div>
+        <div class="metrica"><b>${mm(c.tamano.alto, 1)}</b><span>mm de alto + ${mm(c.rebase)} de rebase</span></div>
+      </div>
+      <p class="explicacion" style="margin-top:20px">${paneles.map((p) => `${NOMBRES_PANEL[p.tipo]} <span class="resaltado">${mm(p.rect.ancho, 2)}</span>`).join(" · ")}</p>
+      <div class="acciones-resultado" style="margin-top:20px">
+        <button class="boton boton-blanco" id="po-plantilla" type="button">Descargar plantilla</button>
+        <label class="boton boton-claro" style="cursor:pointer">Armar con mi PDF<input type="file" id="po-armar" accept="application/pdf,.pdf" hidden></label>
+      </div>
+      <p class="tenue" style="margin-top:14px;font-size:14px">Para armar: un PDF de una sola página con la portada completa, o páginas sueltas en este orden: tapa, contratapa, lomo, solapa de tapa y solapa de contratapa.</p>
+    </section>
+    <section class="tarjeta vista-previa"><div class="lienzo tira-portada">${svgPortada(c)}</div>
+      <div class="leyenda"><span><i style="border-color:#111"></i>Corte</span><span><i style="border-color:#d93b2b"></i>Rebase</span><span><i style="border-color:#c03ac0;border-top-style:dashed"></i>Pliegue</span></div></section>` : ""}`;
+  if (!pintar(caja, html)) return;
+  $("#po-plantilla")?.addEventListener("click", () => {
+    try { const r = motor.plantilla_portada(JSON.stringify(peticionPortada())); descargar(r.pdf, `plantilla-portada-${mm(c.lomo, 1).replace(",", "_")}mm.pdf`); avisar("Plantilla descargada"); }
+    catch (e) { avisar(`Error: ${e.message || e}`); }
+  });
+  $("#po-armar")?.addEventListener("change", async (e) => {
+    const archivo = e.target.files[0];
+    if (!archivo) return;
+    await respirar();
+    try {
+      const bytes = new Uint8Array(await archivo.arrayBuffer());
+      const r = motor.armar_portada(bytes, JSON.stringify(peticionPortada()), new Uint8Array());
+      descargar(r.pdf, `${base(archivo.name)}-portada.pdf`);
+      const inf = JSON.parse(r.informe);
+      avisar(inf.completa ? "Portada verificada: la medida es correcta" : "Portada armada");
+    } catch (err) { avisar(`${err.message || err}`); }
+    e.target.value = "";
+  });
+}
+
+// ───────────── Catálogos ─────────────
+const CONDICIONES = ["FOGRA39", "FOGRA51", "FOGRA52", "GRACoL2013", "SWOP2013C3", "PSOuncoated_v3", "Otra"];
+const EJEMPLOS = [
+  { id: "sm74", nombre: "Heidelberg SM74", tipo: "offset", pliego_max: { ancho: 740, alto: 530 }, pinza: 10, cola: 6, lateral: 5, colores: 4, duplex: false, condicion: "FOGRA39" },
+  { id: "gto52", nombre: "Heidelberg GTO 52", tipo: "offset", pliego_max: { ancho: 520, alto: 360 }, pinza: 10, cola: 5, lateral: 5, colores: 1, duplex: false, condicion: "FOGRA39" },
+  { id: "digital", nombre: "Digital 33×48", tipo: "digital", pliego_max: { ancho: 480, alto: 330 }, pinza: 4, cola: 4, lateral: 4, colores: 4, duplex: true, condicion: "FOGRA39" },
+];
+
+function nuevaMaquina(d) {
+  return {
+    id: d.id, nombre: d.nombre, tipo: d.tipo, pliego_max: d.pliego_max, pliego_min: null,
+    pinza: d.pinza, cola: d.cola, lateral: d.lateral, plancha: null, colores: d.colores, duplex: d.duplex,
+    salida: { pdfx: d.pdfx || "PDF/X-4", perfil_icc: null, condicion: d.condicion || null, jdf: !!d.jdf }, notas: d.notas || "",
+  };
+}
+const slug = (t) => t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32) || "item";
+
+function vistaCatalogos(main) {
+  const pestana = estado.preferencias.pestanaCatalogo || "maquinas";
+  main.innerHTML = `
+    <div class="encabezado">
+      <div><h1>Catálogos</h1><p>Tus máquinas y papeles quedan guardados en este navegador. Exporta una copia para llevarlos a otro equipo.</p></div>
+      <div class="acciones-resultado">
+        <button class="boton boton-claro boton-chico" id="ct-exportar" type="button">Exportar copia</button>
+        <label class="boton boton-claro boton-chico" style="cursor:pointer">Importar<input type="file" id="ct-importar" accept="application/json,.json" hidden></label>
+      </div>
+    </div>
+    <div class="pestanas">${chips("pestana", [["maquinas", `Máquinas · ${estado.maquinas.length}`], ["papeles", `Papeles · ${estado.papeles.length}`]], pestana)}</div>
+    <div id="ct-contenido"></div>
+    <dialog id="ct-dialogo"></dialog>`;
+  conectarChips(main, (_, v) => { preferir("pestanaCatalogo", v); vistaCatalogos(main); });
+  const contenido = $("#ct-contenido");
+  if (pestana === "maquinas") listaMaquinas(contenido, main); else listaPapeles(contenido, main);
+
+  $("#ct-exportar").addEventListener("click", () => {
+    const datos = JSON.stringify({ formato: "montajes-catalogo", version: 1, maquinas: estado.maquinas, papeles: estado.papeles }, null, 2);
+    const url = URL.createObjectURL(new Blob([datos], { type: "application/json" }));
+    Object.assign(document.createElement("a"), { href: url, download: "montajes-catalogo.json" }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  });
+  $("#ct-importar").addEventListener("change", async (e) => {
+    try {
+      const d = JSON.parse(await e.target.files[0].text());
+      let n = 0;
+      for (const m of d.maquinas || []) if (m.id && !estado.maquinas.some((x) => x.id === m.id)) { estado.maquinas.push(m); n++; }
+      for (const p of d.papeles || []) if (p.id && !estado.papeles.some((x) => x.id === p.id)) { estado.papeles.push(p); n++; }
+      guardarCatalogos();
+      avisar(`${n} elementos importados`);
+      vistaCatalogos(main);
+    } catch { avisar("Ese archivo no es una copia de catálogo válida"); }
+  });
+}
+
+function listaMaquinas(caja, main) {
+  const ms = estado.maquinas;
+  caja.innerHTML = `
+    <div class="acciones-resultado" style="margin-bottom:16px">
+      <button class="boton boton-naranja" id="mq-nueva" type="button">Nueva máquina</button>
+      ${ms.length ? "" : `<button class="boton boton-claro" id="mq-ejemplos" type="button">Cargar ejemplos</button>`}
+    </div>
+    ${ms.length ? `<div class="lista">${ms.map((m, i) => `
+      <article class="tarjeta item">
+        <div class="item-cabeza">${[formas.estrella, formas.flor, formas.cuadro, formas.circulo, formas.destello][i % 5](COLORES[i % 4])}<div><h3>${esc(m.nombre)}</h3><span class="etiqueta">${m.tipo === "offset" ? "Offset" : m.tipo === "digital" ? "Digital" : "Gran formato"}</span></div></div>
+        <dl>
+          <dt>Pliego máx.</dt><dd>${mm(m.pliego_max.ancho)} × ${mm(m.pliego_max.alto)} mm</dd>
+          <dt>Pinza / cola</dt><dd>${mm(m.pinza)} / ${mm(m.cola)} mm</dd>
+          <dt>Laterales</dt><dd>${mm(m.lateral)} mm</dd>
+          <dt>Colores</dt><dd>${m.colores}${m.duplex ? " · dúplex" : ""}</dd>
+          <dt>Salida</dt><dd>${esc(m.salida?.pdfx || "PDF/X-4")}${m.salida?.condicion ? ` · ${esc(m.salida.condicion)}` : ""} <span data-icc="${esc(m.id)}"></span></dd>
+        </dl>
+        <div class="acciones"><button class="boton boton-claro boton-chico" data-editar="${esc(m.id)}" type="button">Editar</button><button class="boton boton-claro boton-chico" data-borrar="${esc(m.id)}" type="button">Borrar</button></div>
+      </article>`).join("")}</div>` : `<section class="tarjeta"><div class="vacio" style="padding:40px 0"><span class="orbe" aria-hidden="true"></span><h2>Sin máquinas todavía</h2><p>Crea cada máquina con su pliego máximo, pinza y márgenes. Los montajes se calculan con esos datos.</p></div></section>`}`;
+  for (const m of ms) iccDB.leer(m.id).then((b) => { const s = $(`[data-icc="${CSS.escape(m.id)}"]`); if (s) s.textContent = b ? "· ICC ✓" : "· sin ICC"; });
+  $("#mq-nueva").addEventListener("click", () => dialogoMaquina(null, main));
+  $("#mq-ejemplos")?.addEventListener("click", () => { estado.maquinas.push(...EJEMPLOS.map(nuevaMaquina)); guardarCatalogos(); avisar("Ejemplos cargados: ajústalos a tus máquinas"); vistaCatalogos(main); });
+  $$("[data-editar]", caja).forEach((b) => b.addEventListener("click", () => dialogoMaquina(estado.maquinas.find((m) => m.id === b.dataset.editar), main)));
+  $$("[data-borrar]", caja).forEach((b) => b.addEventListener("click", () => {
+    const m = estado.maquinas.find((x) => x.id === b.dataset.borrar);
+    if (!confirm(`¿Borrar la máquina «${m.nombre}»?`)) return;
+    estado.maquinas = estado.maquinas.filter((x) => x !== m);
+    iccDB.borrar(m.id);
+    guardarCatalogos();
+    vistaCatalogos(main);
+  }));
+}
+
+function dialogoMaquina(m, main) {
+  const d = $("#ct-dialogo");
+  const v = m || nuevaMaquina({ id: "", nombre: "", tipo: "offset", pliego_max: { ancho: 700, alto: 500 }, pinza: 10, cola: 5, lateral: 5, colores: 4, duplex: false, condicion: "FOGRA39" });
+  d.innerHTML = `<form method="dialog" id="mq-form">
+    <h2>${m ? "Editar máquina" : "Nueva máquina"}</h2>
+    <label class="campo"><span>Nombre</span><input type="text" name="nombre" required value="${esc(v.nombre)}" placeholder="Heidelberg SM74"></label>
+    <div class="campo"><span>Tipo</span>${chips("tipo", [["offset", "Offset"], ["digital", "Digital"], ["gran_formato", "Gran formato"]], v.tipo)}</div>
+    <div class="fila">
+      <label class="campo"><span>Pliego máx. ancho (mm)</span><input type="number" step="0.1" name="ancho" required value="${v.pliego_max.ancho}"></label>
+      <label class="campo"><span>Pliego máx. alto (mm)</span><input type="number" step="0.1" name="alto" required value="${v.pliego_max.alto}"></label>
+    </div>
+    <small class="tenue">El ancho es el lado de la pinza.</small>
+    <div class="fila-3">
+      <label class="campo"><span>Pinza</span><input type="number" step="0.5" min="0" name="pinza" value="${v.pinza}"></label>
+      <label class="campo"><span>Cola</span><input type="number" step="0.5" min="0" name="cola" value="${v.cola}"></label>
+      <label class="campo"><span>Laterales</span><input type="number" step="0.5" min="0" name="lateral" value="${v.lateral}"></label>
+    </div>
+    <div class="fila">
+      <label class="campo"><span>Colores / cuerpos</span><input type="number" min="1" max="12" name="colores" value="${v.colores}"></label>
+      <label class="campo"><span>Formato de salida</span><select name="pdfx"><option ${v.salida.pdfx === "PDF/X-4" ? "selected" : ""}>PDF/X-4</option><option ${v.salida.pdfx === "PDF/X-1a" ? "selected" : ""}>PDF/X-1a</option></select></label>
+    </div>
+    ${interruptor("mq-duplex", "Imprime las dos caras en una pasada", v.duplex)}
+    <label class="campo"><span>Condición de impresión</span><select name="condicion">${CONDICIONES.map((c) => `<option ${c === v.salida.condicion ? "selected" : ""}>${c}</option>`).join("")}</select></label>
+    <label class="campo"><span>Perfil ICC de salida (opcional)</span><input type="file" name="icc" accept=".icc,.icm"><small>Con el perfil, el PDF sale identificado como PDF/X con su OutputIntent.</small></label>
+    ${interruptor("mq-jdf", "Su RIP/CTP recibe JDF", v.salida.jdf)}
+    <label class="campo"><span>Notas</span><input type="text" name="notas" value="${esc(v.notas)}"></label>
+    <div class="acciones"><button class="boton boton-claro" value="cancelar" formnovalidate>Cancelar</button><button class="boton" value="guardar">Guardar</button></div>
+  </form>`;
+  let tipo = v.tipo;
+  conectarChips(d, (_, valor) => { tipo = valor; });
+  d.showModal();
+  $("#mq-form").addEventListener("submit", async (e) => {
+    if (e.submitter?.value !== "guardar") return;
+    const f = new FormData(e.target);
+    const datos = {
+      id: m ? m.id : slug(f.get("nombre")), nombre: String(f.get("nombre")).trim(), tipo,
+      pliego_max: { ancho: num(f.get("ancho")), alto: num(f.get("alto")) },
+      pinza: num(f.get("pinza")), cola: num(f.get("cola")), lateral: num(f.get("lateral")),
+      colores: Math.round(num(f.get("colores"), 4)), duplex: $("#mq-duplex").checked,
+      pdfx: f.get("pdfx"), condicion: f.get("condicion") === "Otra" ? null : f.get("condicion"), jdf: $("#mq-jdf").checked, notas: f.get("notas"),
+    };
+    if (!m) while (estado.maquinas.some((x) => x.id === datos.id)) datos.id += "-2";
+    if (datos.pinza + datos.cola >= datos.pliego_max.alto || 2 * datos.lateral >= datos.pliego_max.ancho) { e.preventDefault(); avisar("Los márgenes ocupan todo el pliego"); return; }
+    const nueva = nuevaMaquina(datos);
+    if (m) Object.assign(m, nueva); else estado.maquinas.push(nueva);
+    const icc = f.get("icc");
+    if (icc && icc.size) await iccDB.poner(datos.id, new Uint8Array(await icc.arrayBuffer()));
+    guardarCatalogos();
+    preferir("maquina", datos.id);
+    avisar("Máquina guardada");
+    vistaCatalogos(main);
+  });
+}
+
+function listaPapeles(caja, main) {
+  const ps = estado.papeles;
+  caja.innerHTML = `
+    <div class="acciones-resultado" style="margin-bottom:16px">
+      <button class="boton boton-naranja" id="pp-nuevo" type="button">Nuevo papel</button>
+      <button class="boton boton-claro" id="pp-referencia" type="button">Cargar biblioteca de referencia</button>
+    </div>
+    ${ps.length ? `<div class="lista">${ps.map((p, i) => `
+      <article class="tarjeta item">
+        <div class="item-cabeza">${formas.circulo(COLORES[i % 4])}<div><h3>${esc(p.nombre)}</h3>${p.estucado ? `<span class="etiqueta">Estucado</span>` : ""}</div></div>
+        <dl><dt>Gramaje</dt><dd>${mm(p.gramaje)} g/m²</dd><dt>Calibre</dt><dd>${mm(p.calibre_um)} µm</dd>${p.fibra ? `<dt>Fibra</dt><dd>${p.fibra}</dd>` : ""}</dl>
+        <div class="acciones"><button class="boton boton-claro boton-chico" data-editar="${esc(p.id)}" type="button">Editar</button><button class="boton boton-claro boton-chico" data-borrar="${esc(p.id)}" type="button">Borrar</button></div>
+      </article>`).join("")}</div>` : `<section class="tarjeta"><div class="vacio" style="padding:40px 0"><span class="orbe" aria-hidden="true"></span><h2>Sin papeles todavía</h2><p>Carga la biblioteca de referencia y ajusta los calibres con la ficha de tu proveedor.</p></div></section>`}`;
+  $("#pp-nuevo").addEventListener("click", () => dialogoPapel(null, main));
+  $("#pp-referencia").addEventListener("click", () => {
+    const ref = JSON.parse(motor.papeles_referencia());
+    let n = 0;
+    for (const p of ref) if (!estado.papeles.some((x) => x.id === p.id)) { estado.papeles.push(p); n++; }
+    guardarCatalogos();
+    avisar(`${n} papeles agregados. Verifica los calibres con tu proveedor`);
+    vistaCatalogos(main);
+  });
+  $$("[data-editar]", caja).forEach((b) => b.addEventListener("click", () => dialogoPapel(estado.papeles.find((p) => p.id === b.dataset.editar), main)));
+  $$("[data-borrar]", caja).forEach((b) => b.addEventListener("click", () => {
+    const p = estado.papeles.find((x) => x.id === b.dataset.borrar);
+    if (!confirm(`¿Borrar el papel «${p.nombre}»?`)) return;
+    estado.papeles = estado.papeles.filter((x) => x !== p);
+    guardarCatalogos();
+    vistaCatalogos(main);
+  }));
+}
+
+function dialogoPapel(p, main) {
+  const d = $("#ct-dialogo");
+  const v = p || { id: "", nombre: "", gramaje: 75, calibre_um: 100, estucado: false, fibra: null, pliegos: [{ ancho: 700, alto: 1000 }], notas: "" };
+  d.innerHTML = `<form method="dialog" id="pp-form">
+    <h2>${p ? "Editar papel" : "Nuevo papel"}</h2>
+    <label class="campo"><span>Nombre</span><input type="text" name="nombre" required value="${esc(v.nombre)}" placeholder="Bond 75 g"></label>
+    <div class="fila">
+      <label class="campo"><span>Gramaje (g/m²)</span><input type="number" step="0.1" min="1" name="gramaje" required value="${v.gramaje}"></label>
+      <label class="campo"><span>Calibre (µm)</span><input type="number" step="1" min="1" name="calibre" required value="${v.calibre_um}"><small>Micras: 0,1 mm = 100 µm</small></label>
+    </div>
+    ${interruptor("pp-estucado", "Estucado (brillante, mate o satinado)", v.estucado)}
+    <div class="campo"><span>Fibra</span>${chips("fibra", [["", "Sin indicar"], ["larga", "Larga"], ["corta", "Corta"]], v.fibra || "")}</div>
+    <label class="campo"><span>Notas</span><input type="text" name="notas" value="${esc(v.notas)}"></label>
+    <div class="acciones"><button class="boton boton-claro" value="cancelar" formnovalidate>Cancelar</button><button class="boton" value="guardar">Guardar</button></div>
+  </form>`;
+  let fibra = v.fibra || "";
+  conectarChips(d, (_, valor) => { fibra = valor; });
+  d.showModal();
+  $("#pp-form").addEventListener("submit", (e) => {
+    if (e.submitter?.value !== "guardar") return;
+    const f = new FormData(e.target);
+    const datos = { ...v, nombre: String(f.get("nombre")).trim(), gramaje: num(f.get("gramaje")), calibre_um: num(f.get("calibre")), estucado: $("#pp-estucado").checked, fibra: fibra || null, notas: f.get("notas") };
+    if (!p) { datos.id = slug(datos.nombre); while (estado.papeles.some((x) => x.id === datos.id)) datos.id += "-2"; estado.papeles.push(datos); }
+    else Object.assign(p, datos);
+    guardarCatalogos();
+    avisar("Papel guardado");
+    vistaCatalogos(main);
+  });
+}
+
+// ───────────── Arranque ─────────────
+async function arrancar() {
+  try {
+    await iniciarMotor();
+    $("#version").textContent = `Motor ${motor.version()}`;
+  } catch (e) {
+    $("#vista").innerHTML = `<div class="error-caja">No se pudo cargar el motor de imposición en este navegador (${esc(e.message || e)}). Usa una versión reciente de Chrome, Edge, Firefox o Safari.</div>`;
+    return;
+  }
+  window.addEventListener("hashchange", navegar);
+  navegar();
+}
+arrancar();

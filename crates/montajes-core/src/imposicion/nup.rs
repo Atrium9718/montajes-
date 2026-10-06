@@ -177,6 +177,31 @@ pub fn cara_retiro(p: &ParametrosNup, d: &Distribucion, pagina: usize, volteo: V
     }
 }
 
+/// Todas las caras de un trabajo: un pliego por página o, con `dorso`, un
+/// tiro y un retiro por cada par de páginas frente/dorso.
+pub fn caras_trabajo(p: &ParametrosNup, d: &Distribucion, paginas: usize, dorso: Option<Volteo>) -> Vec<Cara> {
+    let mut caras = Vec::new();
+    match dorso {
+        Some(volteo) => {
+            for par in 0..paginas / 2 {
+                let mut tiro = cara_tiro(p, d, 2 * par);
+                tiro.nombre = format!("Diseño {} tiro", par + 1);
+                let mut retiro = cara_retiro(p, d, 2 * par + 1, volteo);
+                retiro.nombre = format!("Diseño {} retiro", par + 1);
+                caras.extend([tiro, retiro]);
+            }
+        }
+        None => {
+            for i in 0..paginas {
+                let mut tiro = cara_tiro(p, d, i);
+                tiro.nombre = format!("Diseño {}", i + 1);
+                caras.push(tiro);
+            }
+        }
+    }
+    caras
+}
+
 pub(crate) fn bloque(cortes: &[Rect]) -> Rect {
     let x0 = cortes.iter().map(|r| r.x).fold(f64::INFINITY, f64::min);
     let y0 = cortes.iter().map(|r| r.y).fold(f64::INFINITY, f64::min);
