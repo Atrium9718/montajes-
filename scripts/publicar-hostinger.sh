@@ -13,7 +13,7 @@ API="https://developers.hostinger.com/api/hosting/v1"
 cd "$(dirname "$0")/.."
 
 ZIP="$(mktemp -d)/montajes-web.zip"
-(cd web && zip -q -r "$ZIP" index.html estilos.css app.js .htaccess motor)
+(cd web && zip -q -r "$ZIP" . -x "*.DS_Store")
 TAMANO=$(wc -c < "$ZIP" | tr -d ' ')
 
 campo() { python3 -c "import sys,json; print(json.load(sys.stdin)['$1'])"; }

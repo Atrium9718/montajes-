@@ -276,3 +276,19 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; margin-t
 .se-corrige, .puede-corregirse { font-style: normal; font-weight: 600; font-size: 11px; padding: 1px 8px; border-radius: 999px; margin-left: 4px; white-space: nowrap; }
 .se-corrige { background: var(--lima); color: #111; }
 .puede-corregirse { background: var(--superficie-2); color: var(--tinta-suave); }
+
+/* Buscador de máquinas */
+.buscador-maquinas { display: grid; gap: 14px; margin-bottom: 4px; }
+.buscador-orbe { width: 40px; height: 40px; flex: none; filter: blur(6px); }
+.buscador-maquinas input[type="search"] { font-size: 17px; padding: 14px 16px; border-radius: 16px; width: 100%; font: inherit; color: var(--tinta); background: var(--superficie-2); border: 1px solid transparent; }
+.resultados-maquinas { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.resultados-maquinas li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: 16px; background: var(--superficie-2); }
+.resultados-maquinas li div { display: grid; gap: 2px; }
+.resultados-maquinas li span { font-size: 13px; }
+.busqueda-ia { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+.clave-ia { display: grid; gap: 10px; margin-top: 12px; padding: 16px; border-radius: 16px; background: var(--superficie-2); }
+.buscando { display: flex; gap: 14px; align-items: center; margin-top: 12px; }
+.buscando .orbe { width: 48px; height: 48px; flex: none; filter: blur(8px); }
+.buscando div, .ia-encontrado { display: grid; gap: 4px; }
+.ia-encontrado { margin-top: 12px; padding: 14px 16px; border-radius: 16px; background: color-mix(in srgb, var(--lima) 35%, var(--superficie)); }
+.fuentes { font-size: 13px; }

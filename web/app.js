@@ -3,6 +3,7 @@
 // guardan los catálogos en el navegador.
 
 import iniciarMotor, * as motor from "./motor/montajes_web.js";
+import { aMaquina, buscarMaquinas } from "./maquinas-catalogo.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -851,7 +852,7 @@ const EJEMPLOS = [
 
 function nuevaMaquina(d) {
   return {
-    id: d.id, nombre: d.nombre, tipo: d.tipo, pliego_max: d.pliego_max, pliego_min: null,
+    id: d.id, nombre: d.nombre, tipo: d.tipo, pliego_max: d.pliego_max, pliego_min: d.pliego_min ?? null,
     pinza: d.pinza, cola: d.cola, lateral: d.lateral, plancha: null, colores: d.colores, duplex: d.duplex,
     salida: { pdfx: d.pdfx || "PDF/X-4", perfil_icc: null, condicion: d.condicion || null, jdf: !!d.jdf }, notas: d.notas || "",
   };
@@ -897,7 +898,12 @@ function vistaCatalogos(main) {
 function listaMaquinas(caja, main) {
   const ms = estado.maquinas;
   caja.innerHTML = `
-    <div class="acciones-resultado" style="margin-bottom:16px">
+    <section class="tarjeta buscador-maquinas">
+      <div class="paso-titulo"><span class="orbe buscador-orbe" aria-hidden="true"></span><div><h3>Buscar una máquina</h3><p class="tenue" style="font-size:14px">Escribe la marca o el modelo y se cargan todas sus características.</p></div></div>
+      <input type="search" id="mq-buscar" placeholder="Ej.: SM 74, Komori 40, Indigo 7900, Versant…" autocomplete="off" value="${esc(estado.buscarMaquina || "")}">
+      <div id="mq-resultados"></div>
+    </section>
+    <div class="acciones-resultado" style="margin:16px 0">
       <button class="boton boton-naranja" id="mq-nueva" type="button">Nueva máquina</button>
       ${ms.length ? "" : `<button class="boton boton-claro" id="mq-ejemplos" type="button">Cargar ejemplos</button>`}
     </div>
@@ -915,6 +921,9 @@ function listaMaquinas(caja, main) {
       </article>`).join("")}</div>` : `<section class="tarjeta"><div class="vacio" style="padding:40px 0"><span class="orbe" aria-hidden="true"></span><h2>Sin máquinas todavía</h2><p>Crea cada máquina con su pliego máximo, pinza y márgenes. Los montajes se calculan con esos datos.</p></div></section>`}`;
   for (const m of ms) iccDB.leer(m.id).then((b) => { const s = $(`[data-icc="${CSS.escape(m.id)}"]`); if (s) s.textContent = b ? "· ICC ✓" : "· sin ICC"; });
   $("#mq-nueva").addEventListener("click", () => dialogoMaquina(null, main));
+  const buscar = $("#mq-buscar");
+  buscar.addEventListener("input", () => { estado.buscarMaquina = buscar.value; pintarResultados($("#mq-resultados"), buscar.value, main); });
+  pintarResultados($("#mq-resultados"), buscar.value, main);
   $("#mq-ejemplos")?.addEventListener("click", () => { estado.maquinas.push(...EJEMPLOS.map(nuevaMaquina)); guardarCatalogos(); avisar("Ejemplos cargados: ajústalos a tus máquinas"); vistaCatalogos(main); });
   $$("[data-editar]", caja).forEach((b) => b.addEventListener("click", () => dialogoMaquina(estado.maquinas.find((m) => m.id === b.dataset.editar), main)));
   $$("[data-borrar]", caja).forEach((b) => b.addEventListener("click", () => {
@@ -927,11 +936,71 @@ function listaMaquinas(caja, main) {
   }));
 }
 
-function dialogoMaquina(m, main) {
+// ───────────── Buscador de máquinas ─────────────
+const CLAVE_IA = "claveAnthropic";
+
+function pintarResultados(caja, consulta, main) {
+  const texto = consulta.trim();
+  if (!texto) { caja.innerHTML = ""; return; }
+  const encontrados = buscarMaquinas(texto);
+  const clave = almacen.leer(CLAVE_IA, "");
+  caja.innerHTML = `
+    ${encontrados.length ? `<ul class="resultados-maquinas">${encontrados.map((f, i) => `
+      <li><div><b>${esc(f.modelo)}</b><span class="tenue">${f.tipo === "offset" ? "Offset" : "Digital"} · pliego ${f.pliego[0]}×${f.pliego[1]} mm · área ${f.impresion[0]}×${f.impresion[1]} · pinza ${f.pinza} mm${f.verificado ? " · ficha verificada" : ""}</span></div>
+      <button class="boton boton-chico" type="button" data-ficha="${i}">Agregar</button></li>`).join("")}</ul>` : `<p class="tenue" style="margin-top:12px">No está en el catálogo de referencia.</p>`}
+    <div class="busqueda-ia">
+      <button class="boton boton-claro boton-chico" type="button" id="mq-ia">Buscar «${esc(texto)}» en internet</button>
+      <span class="tenue" style="font-size:13px">${clave ? "Con IA: lee las fichas del fabricante y llena el formulario." : "Necesita una clave de API de Anthropic (una sola vez)."}</span>
+    </div>
+    <div id="mq-ia-estado"></div>`;
+  $$("[data-ficha]", caja).forEach((b) => b.addEventListener("click", () => dialogoMaquina(null, main, aMaquina(encontrados[Number(b.dataset.ficha)]))));
+  $("#mq-ia", caja).addEventListener("click", () => buscarEnInternet(texto, $("#mq-ia-estado", caja), main));
+}
+
+function formularioClave(caja, alGuardar) {
+  caja.innerHTML = `<form class="clave-ia" id="clave-form">
+    <label class="campo"><span>Clave de API de Anthropic</span><input type="password" name="clave" placeholder="sk-ant-…" required autocomplete="off"></label>
+    <small class="tenue">Se guarda solo en este navegador y se usa para buscar fichas técnicas con Claude y su búsqueda web. Cada búsqueda tiene un costo pequeño en tu cuenta de Anthropic. Créala en console.anthropic.com → API Keys.</small>
+    <div class="acciones-resultado"><button class="boton boton-chico">Guardar y buscar</button></div>
+  </form>`;
+  $("#clave-form", caja).addEventListener("submit", (e) => {
+    e.preventDefault();
+    const clave = new FormData(e.target).get("clave").trim();
+    if (!clave) return;
+    almacen.guardar(CLAVE_IA, clave);
+    alGuardar(clave);
+  });
+}
+
+async function buscarEnInternet(consulta, caja, main) {
+  const clave = almacen.leer(CLAVE_IA, "");
+  if (!clave) { formularioClave(caja, () => buscarEnInternet(consulta, caja, main)); return; }
+  caja.innerHTML = `<div class="buscando"><span class="orbe orbe-respira" aria-hidden="true"></span><div><b>Buscando la ficha de «${esc(consulta)}»…</b><span class="tenue">Revisando fichas del fabricante y distribuidores. Puede tardar hasta un minuto.</span></div></div>`;
+  try {
+    const { buscarFichaEnInternet, fichaAMaquina } = await import("./busqueda-ia.js");
+    const { ficha, fuentes } = await buscarFichaEnInternet(consulta, clave);
+    // Solo enlaces http(s) válidos: las URLs vienen de la búsqueda.
+    const enlaces = fuentes.flatMap((u) => {
+      try { const url = new URL(u); return /^https?:$/.test(url.protocol) ? [{ href: url.href, dominio: url.hostname.replace(/^www\./, "") }] : []; }
+      catch { return []; }
+    });
+    caja.innerHTML = `<div class="ia-encontrado"><b>Encontrada: ${esc(ficha.modelo)}</b>
+      <span class="tenue">Pliego ${ficha.pliego_max_ancho_mm}×${ficha.pliego_max_alto_mm} mm · ${ficha.colores} colores${ficha.notas ? ` · ${esc(ficha.notas)}` : ""}</span>
+      ${enlaces.length ? `<span class="fuentes">Fuentes: ${enlaces.slice(0, 4).map(({ href, dominio }) => `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(dominio)}</a>`).join(" · ")}</span>` : ""}</div>`;
+    dialogoMaquina(null, main, fichaAMaquina(ficha, fuentes));
+  } catch (e) {
+    const sinClave = /clave de API no es válida/.test(e.message);
+    caja.innerHTML = `<div class="error-caja">${esc(e.message)}${sinClave ? ` <button class="boton boton-claro boton-chico" type="button" id="clave-cambiar">Cambiar clave</button>` : ""}</div>`;
+    $("#clave-cambiar", caja)?.addEventListener("click", () => { almacen.guardar(CLAVE_IA, ""); buscarEnInternet(consulta, caja, main); });
+  }
+}
+
+function dialogoMaquina(m, main, datosIniciales = null) {
   const d = $("#ct-dialogo");
-  const v = m || nuevaMaquina({ id: "", nombre: "", tipo: "offset", pliego_max: { ancho: 700, alto: 500 }, pinza: 10, cola: 5, lateral: 5, colores: 4, duplex: false, condicion: "FOGRA39" });
+  const v = m || nuevaMaquina({ id: "", ...(datosIniciales || { nombre: "", tipo: "offset", pliego_max: { ancho: 700, alto: 500 }, pinza: 10, cola: 5, lateral: 5, colores: 4, duplex: false, condicion: "FOGRA39" }) });
   d.innerHTML = `<form method="dialog" id="mq-form">
-    <h2>${m ? "Editar máquina" : "Nueva máquina"}</h2>
+    <h2>${m ? "Editar máquina" : datosIniciales ? "Revisa y guarda" : "Nueva máquina"}</h2>
+    ${datosIniciales ? `<p class="tenue" style="font-size:14px">Datos cargados de la ficha técnica. Revísalos con tu máquina (la pinza y los márgenes reales pueden variar) y guarda.</p>` : ""}
     <label class="campo"><span>Nombre</span><input type="text" name="nombre" required value="${esc(v.nombre)}" placeholder="Heidelberg SM74"></label>
     <div class="campo"><span>Tipo</span>${chips("tipo", [["offset", "Offset"], ["digital", "Digital"], ["gran_formato", "Gran formato"]], v.tipo)}</div>
     <div class="fila">
@@ -967,6 +1036,7 @@ function dialogoMaquina(m, main) {
       pinza: num(f.get("pinza")), cola: num(f.get("cola")), lateral: num(f.get("lateral")),
       colores: Math.round(num(f.get("colores"), 4)), duplex: $("#mq-duplex").checked,
       pdfx: f.get("pdfx"), condicion: f.get("condicion") === "Otra" ? null : f.get("condicion"), jdf: $("#mq-jdf").checked, notas: f.get("notas"),
+      pliego_min: v.pliego_min,
     };
     if (!m) while (estado.maquinas.some((x) => x.id === datos.id)) datos.id += "-2";
     if (datos.pinza + datos.cola >= datos.pliego_max.alto || 2 * datos.lateral >= datos.pliego_max.ancho) { e.preventDefault(); avisar("Los márgenes ocupan todo el pliego"); return; }
