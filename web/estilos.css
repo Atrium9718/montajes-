@@ -297,3 +297,16 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; margin-t
 .cantidades { display: grid; gap: 8px; }
 .cantidad { display: grid; grid-template-columns: 1fr 110px; gap: 10px; align-items: center; font-size: 14px; }
 .cantidad span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Nube del taller */
+.nube { display: grid; gap: 14px; margin-bottom: 20px; }
+.nube-apagada { border: 2px solid color-mix(in srgb, var(--naranja) 45%, transparent); }
+.nube-cabeza { display: flex; gap: 14px; align-items: flex-start; }
+.nube-cabeza .orbe { width: 44px; height: 44px; flex: none; filter: blur(6px); }
+.nube-cabeza p { margin-top: 4px; }
+.nube-codigo { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.nube-codigo code { font-size: 17px; font-weight: 700; letter-spacing: .06em; padding: 8px 14px; border-radius: 12px; background: var(--superficie-2); }
+.nube-unir { display: flex; gap: 8px; flex: 1; min-width: 260px; }
+.nube-unir input { flex: 1; font: inherit; font-size: 15px; color: var(--tinta); background: var(--superficie-2); border: 1px solid transparent; border-radius: 999px; padding: 10px 16px; text-transform: uppercase; }
+#nube-estado[data-estado="error"] { color: var(--error); }
+#nube-estado[data-estado="ok"]::before { content: "✓ "; color: var(--ok); font-weight: 700; }

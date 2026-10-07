@@ -72,9 +72,160 @@ function conectarCorrecciones(raiz, alCambiar) {
   }));
 }
 
-function guardarCatalogos() {
+// ───────────── Catálogos: guardado local y nube del taller ─────────────
+// Cada elemento lleva «modificado» (ms); los borrados se recuerdan para que
+// también desaparezcan en los demás equipos al sincronizar.
+estado.borrados = almacen.leer("borrados", { maquinas: {}, papeles: {} });
+estado.nube = { estado: "apagada", cuando: 0 };
+const huellas = new Map();
+const sinMarca = (x) => JSON.stringify({ ...x, modificado: undefined });
+for (const x of [...estado.maquinas, ...estado.papeles]) huellas.set(x, sinMarca(x));
+
+function guardarCatalogos(sincronizar = true) {
+  const ahoraMs = Date.now();
+  for (const x of [...estado.maquinas, ...estado.papeles]) {
+    const h = sinMarca(x);
+    if (huellas.get(x) !== h) {
+      x.modificado = ahoraMs;
+      huellas.set(x, h);
+    }
+  }
   almacen.guardar("maquinas", estado.maquinas);
   almacen.guardar("papeles", estado.papeles);
+  almacen.guardar("borrados", estado.borrados);
+  if (sincronizar) programarSincronizacion();
+}
+
+function borrarDelCatalogo(tipo, elemento) {
+  estado[tipo] = estado[tipo].filter((x) => x !== elemento);
+  estado.borrados[tipo][elemento.id] = Date.now();
+  guardarCatalogos();
+}
+
+/** Une dos listas por id: gana la versión modificada más tarde; respeta borrados. */
+function unirListas(local, remota, borrados) {
+  const porId = new Map();
+  for (const x of [...remota, ...local]) {
+    const previo = porId.get(x.id);
+    if (!previo || (x.modificado || 0) > (previo.modificado || 0)) porId.set(x.id, x);
+  }
+  return [...porId.values()].filter((x) => !(borrados[x.id] > (x.modificado || 0)));
+}
+
+const codigoTaller = () => almacen.leer("codigoTaller", "");
+function nuevoCodigoTaller() {
+  const letras = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(20));
+  const s = [...bytes].map((b) => letras[b % letras.length]).join("");
+  return s.match(/.{4}/g).join("-");
+}
+
+let temporizadorNube;
+function programarSincronizacion() {
+  if (!codigoTaller()) return;
+  clearTimeout(temporizadorNube);
+  temporizadorNube = setTimeout(sincronizar, 700);
+}
+
+async function sincronizar() {
+  const codigo = codigoTaller();
+  if (!codigo) return;
+  estado.nube = { ...estado.nube, estado: "sincronizando" };
+  pintarNube();
+  try {
+    const r = await fetch("api/catalogo.php", { headers: { "X-Taller": codigo }, cache: "no-store" });
+    if (!r.ok) throw new Error(`servidor ${r.status}`);
+    const remoto = await r.json();
+    const borrados = { maquinas: { ...(remoto.borrados?.maquinas || {}), ...estado.borrados.maquinas }, papeles: { ...(remoto.borrados?.papeles || {}), ...estado.borrados.papeles } };
+    estado.borrados = borrados;
+    estado.maquinas = unirListas(estado.maquinas, remoto.maquinas || [], borrados.maquinas);
+    estado.papeles = unirListas(estado.papeles, remoto.papeles || [], borrados.papeles);
+    for (const x of [...estado.maquinas, ...estado.papeles]) huellas.set(x, sinMarca(x));
+    guardarCatalogos(false);
+    const igual = JSON.stringify(remoto.maquinas || []) === JSON.stringify(estado.maquinas)
+      && JSON.stringify(remoto.papeles || []) === JSON.stringify(estado.papeles)
+      && JSON.stringify(remoto.borrados || {}) === JSON.stringify(borrados);
+    if (igual) { estado.nube = { estado: "ok", cuando: Date.now() }; pintarNube(); return; }
+    const g = await fetch("api/catalogo.php", {
+      method: "POST",
+      headers: { "X-Taller": codigo, "Content-Type": "application/json" },
+      body: JSON.stringify({ maquinas: estado.maquinas, papeles: estado.papeles, borrados }),
+    });
+    if (!g.ok) throw new Error(`servidor ${g.status}`);
+    estado.nube = { estado: "ok", cuando: Date.now() };
+  } catch (e) {
+    console.warn("Sincronización:", e);
+    estado.nube = { estado: "error", cuando: estado.nube.cuando };
+  }
+  pintarNube();
+  // Si se está viendo un catálogo, se refresca con lo que llegó de otros equipos.
+  if ((location.hash || "#inicio") === "#catalogos" && !$("#ct-dialogo")?.open) {
+    const contenido = $("#ct-contenido");
+    if (contenido) (estado.preferencias.pestanaCatalogo || "maquinas") === "maquinas" ? listaMaquinas(contenido, $("#vista")) : listaPapeles(contenido, $("#vista"));
+  }
+}
+
+function textoNube() {
+  const n = estado.nube;
+  if (!codigoTaller()) return "";
+  if (n.estado === "sincronizando") return "Sincronizando…";
+  if (n.estado === "error") return "Sin conexión con la nube: se guardó en este equipo y se sincroniza al volver.";
+  if (n.estado === "ok") return `Guardado en la nube del taller · ${new Date(n.cuando).toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" })}`;
+  return "Nube del taller conectada";
+}
+function pintarNube() {
+  const el = $("#nube-estado");
+  if (el) {
+    el.textContent = textoNube();
+    el.dataset.estado = estado.nube.estado;
+  }
+}
+
+function bloqueNube() {
+  const codigo = codigoTaller();
+  if (codigo) {
+    return `<section class="tarjeta nube">
+      <div class="nube-cabeza"><span class="orbe" aria-hidden="true"></span><div><h3>Nube del taller</h3><p id="nube-estado" class="tenue" data-estado="${estado.nube.estado}">${esc(textoNube())}</p></div></div>
+      <div class="nube-codigo"><span class="tenue">Código del taller</span><code>${esc(codigo)}</code>
+        <button class="boton boton-claro boton-chico" type="button" id="nube-copiar">Copiar</button>
+        <button class="boton boton-claro boton-chico" type="button" id="nube-salir">Desconectar este equipo</button></div>
+      <small class="tenue">Escribe este código en cada computador o celular del taller para ver las mismas máquinas y papeles. Guárdalo en un lugar seguro: quien lo tenga puede ver y editar los catálogos.</small>
+    </section>`;
+  }
+  return `<section class="tarjeta nube nube-apagada">
+    <div class="nube-cabeza"><span class="orbe" aria-hidden="true"></span><div><h3>Guarda tus catálogos en la nube del taller</h3><p class="tenue">Ahora solo están en este navegador: si cambias de equipo o se borran los datos del navegador, se pierden. Con la nube quedan en tu servidor y en todos los equipos del taller.</p></div></div>
+    <div class="acciones-resultado">
+      <button class="boton boton-naranja" type="button" id="nube-crear">Crear código del taller</button>
+      <form id="nube-unir" class="nube-unir"><input type="text" name="codigo" placeholder="Ya tengo un código: XXXX-XXXX-…" autocomplete="off" aria-label="Código del taller"><button class="boton boton-claro">Conectar</button></form>
+    </div>
+  </section>`;
+}
+
+function conectarNube(main) {
+  $("#nube-crear")?.addEventListener("click", async () => {
+    almacen.guardar("codigoTaller", nuevoCodigoTaller());
+    await sincronizar();
+    avisar("Catálogos guardados en la nube del taller");
+    vistaCatalogos(main);
+  });
+  $("#nube-unir")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const codigo = String(new FormData(e.target).get("codigo") || "").trim().toUpperCase();
+    if (!/^[A-Z0-9-]{16,64}$/.test(codigo)) { avisar("Ese código no es válido"); return; }
+    almacen.guardar("codigoTaller", codigo);
+    await sincronizar();
+    avisar(estado.nube.estado === "ok" ? "Equipo conectado a la nube del taller" : "No se pudo conectar; se reintentará");
+    vistaCatalogos(main);
+  });
+  $("#nube-copiar")?.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(codigoTaller()); avisar("Código copiado"); } catch { avisar(codigoTaller()); }
+  });
+  $("#nube-salir")?.addEventListener("click", () => {
+    if (!confirm("¿Desconectar este equipo de la nube? Los catálogos quedan en el servidor y en este navegador.")) return;
+    almacen.guardar("codigoTaller", "");
+    estado.nube = { estado: "apagada", cuando: 0 };
+    vistaCatalogos(main);
+  });
 }
 function preferir(clave, valor) { estado.preferencias[clave] = valor; almacen.guardar("preferencias", estado.preferencias); }
 
@@ -152,7 +303,7 @@ function vistaInicio(main) {
         <div class="cifra"><b class="num">${estado.papeles.length}</b><span>papeles</span></div>
       </div>
       <div>
-        <p style="max-width:440px">${estado.maquinas.length ? "Tus máquinas y papeles se guardan en este navegador. Puedes exportarlos para usarlos en otro equipo." : "Empieza creando las máquinas del taller: tamaño de pliego, pinza y márgenes. Se guardan para siempre."}</p>
+        <p style="max-width:440px">${estado.maquinas.length ? codigoTaller() ? "Tus máquinas y papeles están en la nube del taller y se comparten entre tus equipos." : "Tus máquinas y papeles están solo en este navegador. Actívalos en la nube del taller desde Catálogos para no perderlos." : "Empieza creando las máquinas del taller: tamaño de pliego, pinza y márgenes. Se guardan para siempre."}</p>
         <a class="boton ${estado.maquinas.length ? "boton-claro" : "boton-naranja"}" style="margin-top:14px" href="#catalogos">${estado.maquinas.length ? "Ver catálogos" : "Crear mi primera máquina"}</a>
       </div>
     </section>`;
@@ -956,16 +1107,18 @@ function vistaCatalogos(main) {
   const pestana = estado.preferencias.pestanaCatalogo || "maquinas";
   main.innerHTML = `
     <div class="encabezado">
-      <div><h1>Catálogos</h1><p>Tus máquinas y papeles quedan guardados en este navegador. Exporta una copia para llevarlos a otro equipo.</p></div>
+      <div><h1>Catálogos</h1><p>Máquinas y papeles del taller. Con la nube del taller se comparten entre todos los equipos; también puedes exportar una copia.</p></div>
       <div class="acciones-resultado">
         <button class="boton boton-claro boton-chico" id="ct-exportar" type="button">Exportar copia</button>
         <label class="boton boton-claro boton-chico" style="cursor:pointer">Importar<input type="file" id="ct-importar" accept="application/json,.json" hidden></label>
       </div>
     </div>
+    ${bloqueNube()}
     <div class="pestanas">${chips("pestana", [["maquinas", `Máquinas · ${estado.maquinas.length}`], ["papeles", `Papeles · ${estado.papeles.length}`]], pestana)}</div>
     <div id="ct-contenido"></div>
     <dialog id="ct-dialogo"></dialog>`;
   conectarChips(main, (_, v) => { preferir("pestanaCatalogo", v); vistaCatalogos(main); });
+  conectarNube(main);
   const contenido = $("#ct-contenido");
   if (pestana === "maquinas") listaMaquinas(contenido, main); else listaPapeles(contenido, main);
 
@@ -1022,7 +1175,7 @@ function listaMaquinas(caja, main) {
   $$("[data-borrar]", caja).forEach((b) => b.addEventListener("click", () => {
     const m = estado.maquinas.find((x) => x.id === b.dataset.borrar);
     if (!confirm(`¿Borrar la máquina «${m.nombre}»?`)) return;
-    estado.maquinas = estado.maquinas.filter((x) => x !== m);
+    borrarDelCatalogo("maquinas", m);
     iccDB.borrar(m.id);
     guardarCatalogos();
     vistaCatalogos(main);
@@ -1170,7 +1323,7 @@ function listaPapeles(caja, main) {
   $$("[data-borrar]", caja).forEach((b) => b.addEventListener("click", () => {
     const p = estado.papeles.find((x) => x.id === b.dataset.borrar);
     if (!confirm(`¿Borrar el papel «${p.nombre}»?`)) return;
-    estado.papeles = estado.papeles.filter((x) => x !== p);
+    borrarDelCatalogo("papeles", p);
     guardarCatalogos();
     vistaCatalogos(main);
   }));
@@ -1217,5 +1370,11 @@ async function arrancar() {
   }
   window.addEventListener("hashchange", navegar);
   navegar();
+  // Pide al navegador no borrar estos datos cuando le falte espacio.
+  navigator.storage?.persist?.().catch(() => {});
+  if (codigoTaller()) {
+    sincronizar();
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") sincronizar(); });
+  }
 }
 arrancar();
