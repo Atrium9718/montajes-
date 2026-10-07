@@ -5,6 +5,7 @@
 
 use montajes_core::catalogo::{Maquina, PerfilSalida, VersionPdfx, papeles_de_referencia};
 use montajes_core::correcciones::Correcciones;
+use montajes_core::cotizacion;
 use montajes_core::geometria::Tamano;
 use montajes_core::imposicion::firmas::{self, Aprovechamiento, Encuadernacion, ParametrosLibro, PlanLibro};
 use montajes_core::imposicion::marcas::OpcionesMarcas;
@@ -134,6 +135,21 @@ fn escribir(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> R<(Vec
     let mut bytes = Vec::new();
     doc.save_to(&mut bytes).map_err(error)?;
     Ok((bytes, informe.avisos, informe.pdfx_identificado))
+}
+
+// ───────────────────────── Cotización ─────────────────────────
+
+/// Cotiza un trabajo (papel con mácula, planchas, impresión, acabados).
+#[wasm_bindgen]
+pub fn cotizar(peticion: &str) -> R<String> {
+    let p: cotizacion::ParametrosCotizacion = serde_json::from_str(peticion).map_err(error)?;
+    serde_json::to_string(&cotizacion::cotizar(&p).map_err(error)?).map_err(error)
+}
+
+/// Pliegos de máquina que salen de un pliego de compra.
+#[wasm_bindgen]
+pub fn salen_de(compra_ancho: f64, compra_alto: f64, pliego_ancho: f64, pliego_alto: f64) -> u32 {
+    cotizacion::salen_de(Tamano::new(compra_ancho, compra_alto), Tamano::new(pliego_ancho, pliego_alto))
 }
 
 // ───────────────────────── Preflight ─────────────────────────

@@ -132,6 +132,32 @@ export function calcular_portada_json(peticion) {
 }
 
 /**
+ * Cotiza un trabajo (papel con mácula, planchas, impresión, acabados).
+ * @param {string} peticion
+ * @returns {string}
+ */
+export function cotizar(peticion) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(peticion, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.cotizar(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * @param {Uint8Array} pdf
  * @param {string} peticion
  * @param {Uint8Array} icc
@@ -323,6 +349,19 @@ export function revisar_pdf(pdf, peticion) {
     } finally {
         wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
     }
+}
+
+/**
+ * Pliegos de máquina que salen de un pliego de compra.
+ * @param {number} compra_ancho
+ * @param {number} compra_alto
+ * @param {number} pliego_ancho
+ * @param {number} pliego_alto
+ * @returns {number}
+ */
+export function salen_de(compra_ancho, compra_alto, pliego_ancho, pliego_alto) {
+    const ret = wasm.salen_de(compra_ancho, compra_alto, pliego_ancho, pliego_alto);
+    return ret >>> 0;
 }
 
 /**

@@ -6,6 +6,7 @@
 
 pub mod catalogo;
 pub mod correcciones;
+pub mod cotizacion;
 pub mod error;
 pub mod geometria;
 pub mod imposicion;

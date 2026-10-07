@@ -310,3 +310,24 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; margin-t
 .nube-unir input { flex: 1; font: inherit; font-size: 15px; color: var(--tinta); background: var(--superficie-2); border: 1px solid transparent; border-radius: 999px; padding: 10px 16px; text-transform: uppercase; }
 #nube-estado[data-estado="error"] { color: var(--error); }
 #nube-estado[data-estado="ok"]::before { content: "✓ "; color: var(--ok); font-weight: 700; }
+
+/* Cotización */
+.columna-resultado { display: grid; gap: 20px; align-content: start; min-width: 0; }
+.cotizacion { display: grid; gap: 14px; }
+.cotizacion-orbe { width: 40px; height: 40px; flex: none; filter: blur(6px); }
+.acabados { display: grid; gap: 8px; }
+.acabado { display: grid; grid-template-columns: 1fr 130px 110px auto; gap: 8px; align-items: center; }
+@media (max-width: 560px) { .acabado { grid-template-columns: 1fr 1fr; } }
+.cotizacion-cifras { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.cotizacion-cifras div { background: var(--superficie-2); border-radius: 16px; padding: 12px; display: grid; gap: 2px; }
+.cotizacion-cifras b { font-size: 24px; letter-spacing: -0.02em; }
+.cotizacion-cifras span { font-size: 12px; color: var(--gris); }
+@media (max-width: 560px) { .cotizacion-cifras { grid-template-columns: 1fr 1fr; } }
+.cotizacion-tabla { width: 100%; border-collapse: collapse; font-size: 15px; }
+.cotizacion-tabla td { padding: 10px 0; border-bottom: 1px solid var(--linea); vertical-align: top; }
+.cotizacion-tabla td:last-child { text-align: right; white-space: nowrap; padding-left: 12px; }
+.cotizacion-tabla tr.sub td { font-weight: 700; }
+.cotizacion-total { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; background: var(--oscuro); color: #fff; border-radius: 20px; padding: 18px 20px; }
+.cotizacion-total span { display: block; font-size: 13px; color: #9c9c97; }
+.cotizacion-total b { font-size: clamp(26px, 4vw, 40px); letter-spacing: -0.03em; }
+.aviso-suave { font-size: 14px; padding: 10px 14px; border-radius: 12px; background: color-mix(in srgb, var(--naranja) 12%, var(--superficie)); }

@@ -613,7 +613,7 @@ function vistaPiezas(main) {
           ${bloqueCorrecciones("pz")}
         </section>
       </div>
-      <div class="resultado" id="pz-resultado"></div>
+      <div class="columna-resultado"><div class="resultado" id="pz-resultado"></div><div id="pz-cotizacion"></div></div>
     </div>`;
 
   if (o.modo === "combinar") {
@@ -767,6 +767,7 @@ function calcularPiezas() {
     </section>` : ""}
     ${listaAvisos(t.plan?.avisos)}
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver el pliego" : "Sube un PDF para ver el montaje")}`;
+  pintarCotizacion("piezas");
   const carasPz = t.plan?.caras ?? t.plan?.plan?.caras;
   if (carasPz?.length) pedirMiniaturas(t, carasPz[Math.min(t.cara, carasPz.length - 1)].ubicaciones.map((u) => u.pagina), calcularPiezas);
   if (!pintar(caja, html)) return;
@@ -786,6 +787,136 @@ function calcularPiezas() {
       avisar(`${inf.pdfx ? "PDF listo (con perfil de salida)" : "PDF listo"}${corregidos ? ` · ${corregidos} correcciones aplicadas` : ""}`);
     } catch (err) { avisar(`Error: ${err.message || err}`); }
     b.disabled = false; b.textContent = "Descargar PDF listo para imprimir";
+  });
+}
+
+// ───────────── Cotización ─────────────
+const pesos = (v) => "$" + Math.round(v).toLocaleString("es-CO");
+const UNIDADES = [["ejemplar", "por ejemplar"], ["millar", "por millar"], ["pliego", "por pliego"], ["fijo", "valor fijo"]];
+
+function datosCotizacion(tipo) {
+  estado.cotizar ??= {};
+  const pref = estado.preferencias.cotizacion || {};
+  estado.cotizar[tipo] ??= {
+    cantidad: 1000, tiro: null, retiro: null, papel: tipo === "libro" ? estado.preferencias.papelTripa || "" : "",
+    acabados: pref.acabados?.[tipo] || (tipo === "libro" ? [{ concepto: "Encuadernación", unidad: "ejemplar", valor: 0 }] : [{ concepto: "Corte", unidad: "millar", valor: 0 }]),
+  };
+  return estado.cotizar[tipo];
+}
+
+/** Tirajes del trabajo actual: un pliego distinto por diseño, firma o combinado. */
+function tirajesDe(tipo, c, maquina) {
+  const tiro = c.tiro ?? maquina.colores;
+  if (tipo === "libro") {
+    const plan = estado.libro.plan?.plan;
+    if (!plan) return null;
+    const retiro = c.retiro ?? maquina.colores;
+    return plan.firmas.map((f) => ({ nombre: `Firma ${f.numero}`, pliegos_netos: Math.ceil(c.cantidad / f.copias), colores_tiro: tiro, colores_retiro: retiro, tira_retira: f.tira_retira }));
+  }
+  const t = estado.piezas;
+  if (!t.plan) return null;
+  const retiro = c.retiro ?? (t.op.dorso ? maquina.colores : 0);
+  if (t.op.modo === "combinar") {
+    return [{ nombre: "Combinado", pliegos_netos: t.plan.plan.pliegos, colores_tiro: tiro, colores_retiro: retiro, tira_retira: false }];
+  }
+  const d = t.plan.distribucion;
+  const disenos = t.op.dorso ? Math.floor(t.info.paginas.length / 2) : t.info.paginas.length;
+  return Array.from({ length: disenos }, (_, i) => ({ nombre: `Diseño ${i + 1}`, pliegos_netos: Math.ceil(c.cantidad / (d.columnas * d.filas)), colores_tiro: tiro, colores_retiro: retiro, tira_retira: false }));
+}
+
+function pintarCotizacion(tipo) {
+  const caja = $(tipo === "libro" ? "#lb-cotizacion" : "#pz-cotizacion");
+  if (!caja) return;
+  const maquina = maquinaElegida(tipo === "libro" ? "lb-maquina" : "pz-maquina");
+  const c = datosCotizacion(tipo);
+  const tirajes = maquina && tirajesDe(tipo, c, maquina);
+  if (!tirajes) { caja.innerHTML = ""; return; }
+  const combinado = tipo === "piezas" && estado.piezas.op.modo === "combinar";
+  const cantidad = combinado ? disenosCombinado(estado.piezas).reduce((a, x) => a + x.cantidad, 0) : c.cantidad;
+  const pref = estado.preferencias.cotizacion || {};
+  const utilidad = pref.utilidad ?? 30, impuesto = pref.impuesto ?? 0;
+  const papel = estado.papeles.find((p) => p.id === c.papel);
+  const costos = maquina.costos || costosPorDefecto(maquina.tipo);
+  let resultado = null, error = "";
+  try {
+    const compra = papel?.pliegos?.[0] || { ancho: 700, alto: 1000 };
+    const pliego = (tipo === "libro" ? estado.libro.plan?.pliego : estado.piezas.plan?.pliego) || maquina.pliego_max;
+    resultado = JSON.parse(motor.cotizar(JSON.stringify({
+      cantidad, tirajes, utilidad_porcentaje: utilidad, impuesto_porcentaje: impuesto,
+      maquina: { digital: maquina.tipo === "digital", duplex: !!maquina.duplex, ...costos },
+      papel: papel ? { nombre: papel.nombre, precio_pliego_compra: papel.precio || 0, salen_por_pliego: motor.salen_de(compra.ancho, compra.alto, pliego.ancho, pliego.alto) } : null,
+      acabados: c.acabados.filter((a) => a.concepto && a.valor > 0),
+    })));
+  } catch (e) { error = String(e.message || e); }
+  const sinCostos = !costos.costo_plancha && !costos.costo_millar && !costos.costo_clic && !costos.costo_arranque;
+  caja.innerHTML = `<section class="tarjeta cotizacion">
+    <div class="paso-titulo"><span class="orbe cotizacion-orbe" aria-hidden="true"></span><div><h3>Cotización</h3><p class="tenue" style="font-size:14px">Papel con mácula, planchas, impresión y acabados de ${esc(maquina.nombre)}.</p></div></div>
+    <div class="fila-3">
+      ${combinado ? `<div class="campo"><span>Ejemplares</span><b class="num" style="padding:11px 0">${cantidad.toLocaleString("es-CO")}</b></div>` : `<label class="campo"><span>Ejemplares</span><input type="number" min="1" step="100" data-cot="cantidad" value="${c.cantidad}"></label>`}
+      <label class="campo"><span>Colores tiro</span><input type="number" min="0" max="12" data-cot="tiro" value="${tirajes[0].colores_tiro}"></label>
+      <label class="campo"><span>Colores retiro</span><input type="number" min="0" max="12" data-cot="retiro" value="${tirajes[0].colores_retiro}"></label>
+    </div>
+    <label class="campo"><span>Papel</span><select data-cot="papel"><option value="">Sin papel (lo pone el cliente)</option>${estado.papeles.map((p) => `<option value="${esc(p.id)}" ${p.id === c.papel ? "selected" : ""}>${esc(p.nombre)}${p.precio ? ` · ${pesos(p.precio)} pliego` : " · sin precio"}</option>`).join("")}</select></label>
+    <div class="campo"><span>Acabados</span>
+      <div class="acabados">${c.acabados.map((a, i) => `<div class="acabado">
+        <input type="text" data-acabado="${i}" data-campo="concepto" value="${esc(a.concepto)}" placeholder="Corte, plegado, laminado…" aria-label="Concepto">
+        <select data-acabado="${i}" data-campo="unidad" aria-label="Unidad">${UNIDADES.map(([v, t]) => `<option value="${v}" ${v === a.unidad ? "selected" : ""}>${t}</option>`).join("")}</select>
+        <input type="number" min="0" step="any" data-acabado="${i}" data-campo="valor" value="${a.valor}" aria-label="Valor">
+        <button class="boton boton-claro boton-chico" type="button" data-quitar-acabado="${i}" aria-label="Quitar">×</button></div>`).join("")}
+        <button class="boton boton-claro boton-chico" type="button" id="${tipo}-agregar-acabado">+ Agregar acabado</button></div></div>
+    <div class="fila">
+      <label class="campo"><span>Utilidad (%)</span><input type="number" min="0" step="1" data-cot="utilidad" value="${utilidad}"></label>
+      <label class="campo"><span>Impuesto (%)</span><input type="number" min="0" step="1" data-cot="impuesto" value="${impuesto}"></label>
+    </div>
+    ${sinCostos ? `<div class="aviso-suave">La máquina no tiene costos cargados: complétalos en Catálogos → Editar máquina → «Mácula y costos».</div>` : ""}
+    ${papel && !papel.precio ? `<div class="aviso-suave">El papel «${esc(papel.nombre)}» no tiene precio: agrégalo en Catálogos → Papeles.</div>` : ""}
+    ${error ? `<div class="error-caja">${esc(error)}</div>` : ""}
+    ${resultado ? `<div class="cotizacion-cifras">
+        <div><b class="num">${resultado.pliegos_netos.toLocaleString("es-CO")}</b><span>pliegos netos</span></div>
+        <div><b class="num">+${resultado.macula.toLocaleString("es-CO")}</b><span>mácula</span></div>
+        <div><b class="num">${resultado.pliegos_compra ? resultado.pliegos_compra.toLocaleString("es-CO") : "—"}</b><span>pliegos de compra</span></div>
+        <div><b class="num">${resultado.planchas}</b><span>planchas</span></div>
+      </div>
+      <table class="cotizacion-tabla"><tbody>
+        ${resultado.lineas.map((l) => `<tr><td><b>${esc(l.concepto)}</b><br><small class="tenue">${esc(l.detalle)}</small></td><td class="num">${pesos(l.valor)}</td></tr>`).join("")}
+        <tr class="sub"><td>Subtotal</td><td class="num">${pesos(resultado.subtotal)}</td></tr>
+        ${resultado.utilidad ? `<tr><td>Utilidad ${utilidad} %</td><td class="num">${pesos(resultado.utilidad)}</td></tr>` : ""}
+        ${resultado.impuesto ? `<tr><td>Impuesto ${impuesto} %</td><td class="num">${pesos(resultado.impuesto)}</td></tr>` : ""}
+      </tbody></table>
+      <div class="cotizacion-total"><div><span>Total</span><b class="num">${pesos(resultado.total)}</b></div><div><span>Por ejemplar</span><b class="num">${pesos(resultado.unitario)}</b></div></div>
+      <div class="acciones-resultado"><button class="boton boton-chico" type="button" id="${tipo}-copiar-cotizacion">Copiar cotización</button></div>` : ""}
+  </section>`;
+  // Se redibuja después del evento: un «change» que llega al perder el foco
+  // no debe reemplazar la tarjeta mientras el navegador todavía la usa.
+  const repintar = () => { clearTimeout(caja._repintar); caja._repintar = setTimeout(() => pintarCotizacion(tipo), 0); };
+  $$("[data-cot]", caja).forEach((el) => el.addEventListener("change", (e) => {
+    e.stopPropagation();
+    const k = el.dataset.cot;
+    if (k === "utilidad" || k === "impuesto") preferir("cotizacion", { ...(estado.preferencias.cotizacion || {}), [k]: Math.max(0, num(el.value, 0)) });
+    else if (k === "papel") c.papel = el.value;
+    else c[k] = Math.max(k === "cantidad" ? 1 : 0, Math.round(num(el.value, 0)));
+    repintar();
+  }));
+  const guardarAcabados = () => preferir("cotizacion", { ...(estado.preferencias.cotizacion || {}), acabados: { ...(estado.preferencias.cotizacion?.acabados || {}), [tipo]: c.acabados } });
+  $$("[data-acabado]", caja).forEach((el) => el.addEventListener("change", (e) => {
+    e.stopPropagation();
+    const a = c.acabados[Number(el.dataset.acabado)];
+    a[el.dataset.campo] = el.dataset.campo === "valor" ? Math.max(0, num(el.value, 0)) : el.value;
+    guardarAcabados(); repintar();
+  }));
+  $$("[data-quitar-acabado]", caja).forEach((b) => b.addEventListener("click", () => { c.acabados.splice(Number(b.dataset.quitarAcabado), 1); guardarAcabados(); repintar(); }));
+  $(`#${tipo}-agregar-acabado`, caja)?.addEventListener("click", () => { c.acabados.push({ concepto: "", unidad: "ejemplar", valor: 0 }); repintar(); });
+  $(`#${tipo}-copiar-cotizacion`, caja)?.addEventListener("click", async () => {
+    const r = resultado;
+    const texto = [
+      `Cotización · ${cantidad.toLocaleString("es-CO")} ejemplares`,
+      ...r.lineas.map((l) => `• ${l.concepto}: ${pesos(l.valor)} (${l.detalle})`),
+      `Subtotal: ${pesos(r.subtotal)}`,
+      r.utilidad ? `Utilidad: ${pesos(r.utilidad)}` : "",
+      r.impuesto ? `Impuesto: ${pesos(r.impuesto)}` : "",
+      `TOTAL: ${pesos(r.total)} · ${pesos(r.unitario)} por ejemplar`,
+    ].filter(Boolean).join("\n");
+    try { await navigator.clipboard.writeText(texto); avisar("Cotización copiada"); } catch { avisar("No se pudo copiar"); }
   });
 }
 
@@ -830,7 +961,7 @@ function vistaLibro(main) {
           ${bloqueCorrecciones("lb")}
         </section>
       </div>
-      <div class="resultado" id="lb-resultado"></div>
+      <div class="columna-resultado"><div class="resultado" id="lb-resultado"></div><div id="lb-cotizacion"></div></div>
     </div>`;
   conectarArchivo("lb-archivo", (a) => { analizarArchivo(t, a); vistaLibro(main); });
   $("#lb-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaLibro(main); });
@@ -917,6 +1048,7 @@ function calcularLibro() {
     </section>` : ""}
     ${listaAvisos(t.plan?.avisos)}
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver las firmas" : "Sube el interior para ver las firmas", true)}`;
+  pintarCotizacion("libro");
   const carasLb = t.plan?.plan?.caras;
   if (carasLb?.length) pedirMiniaturas(t, carasLb[Math.min(t.cara, carasLb.length - 1)].ubicaciones.map((u) => u.pagina), calcularLibro);
   if (!pintar(caja, html)) return;
@@ -1099,7 +1231,15 @@ function nuevaMaquina(d) {
     id: d.id, nombre: d.nombre, tipo: d.tipo, pliego_max: d.pliego_max, pliego_min: d.pliego_min ?? null,
     pinza: d.pinza, cola: d.cola, lateral: d.lateral, plancha: null, colores: d.colores, duplex: d.duplex,
     salida: { pdfx: d.pdfx || "PDF/X-4", perfil_icc: null, condicion: d.condicion || null, jdf: !!d.jdf }, notas: d.notas || "",
+    costos: d.costos || costosPorDefecto(d.tipo),
   };
+}
+
+/** Mácula y costos de partida: se ajustan en cada máquina. */
+function costosPorDefecto(tipo) {
+  return tipo === "digital"
+    ? { costo_plancha: 0, costo_arranque: 0, costo_millar: 0, costo_minimo: 0, costo_clic: 0, macula_arranque: 5, macula_porcentaje: 1 }
+    : { costo_plancha: 0, costo_arranque: 0, costo_millar: 0, costo_minimo: 0, costo_clic: 0, macula_arranque: 100, macula_porcentaje: 3 };
 }
 const slug = (t) => t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32) || "item";
 
@@ -1267,6 +1407,21 @@ function dialogoMaquina(m, main, datosIniciales = null) {
     <label class="campo"><span>Condición de impresión</span><select name="condicion">${CONDICIONES.map((c) => `<option ${c === v.salida.condicion ? "selected" : ""}>${c}</option>`).join("")}</select></label>
     <label class="campo"><span>Perfil ICC de salida (opcional)</span><input type="file" name="icc" accept=".icc,.icm"><small>Con el perfil, el PDF sale identificado como PDF/X con su OutputIntent.</small></label>
     ${interruptor("mq-jdf", "Su RIP/CTP recibe JDF", v.salida.jdf)}
+    <details class="avanzado" open><summary>Mácula y costos (para cotizar)</summary><div class="paso">
+      <div class="fila">
+        <label class="campo"><span>Mácula de arranque</span><input type="number" min="0" step="10" name="macula_arranque" value="${(v.costos || costosPorDefecto(v.tipo)).macula_arranque}"><small>Pliegos por cada pasada (puesta a punto)</small></label>
+        <label class="campo"><span>Mácula de tiraje (%)</span><input type="number" min="0" step="0.5" name="macula_porcentaje" value="${(v.costos || costosPorDefecto(v.tipo)).macula_porcentaje}"><small>Desperdicio durante la impresión</small></label>
+      </div>
+      <div class="fila">
+        <label class="campo"><span>Plancha (c/u)</span><input type="number" min="0" name="costo_plancha" value="${v.costos?.costo_plancha ?? 0}"></label>
+        <label class="campo"><span>Arranque por pasada</span><input type="number" min="0" name="costo_arranque" value="${v.costos?.costo_arranque ?? 0}"></label>
+      </div>
+      <div class="fila">
+        <label class="campo"><span>Millar de pliegos (por pasada)</span><input type="number" min="0" name="costo_millar" value="${v.costos?.costo_millar ?? 0}"></label>
+        <label class="campo"><span>Clic digital (por cara)</span><input type="number" min="0" step="0.1" name="costo_clic" value="${v.costos?.costo_clic ?? 0}"></label>
+      </div>
+      <label class="campo"><span>Mínimo de impresión por tiraje</span><input type="number" min="0" name="costo_minimo" value="${v.costos?.costo_minimo ?? 0}"></label>
+    </div></details>
     <label class="campo"><span>Notas</span><input type="text" name="notas" value="${esc(v.notas)}"></label>
     <div class="acciones"><button class="boton boton-claro" value="cancelar" formnovalidate>Cancelar</button><button class="boton" value="guardar">Guardar</button></div>
   </form>`;
@@ -1283,6 +1438,7 @@ function dialogoMaquina(m, main, datosIniciales = null) {
       colores: Math.round(num(f.get("colores"), 4)), duplex: $("#mq-duplex").checked,
       pdfx: f.get("pdfx"), condicion: f.get("condicion") === "Otra" ? null : f.get("condicion"), jdf: $("#mq-jdf").checked, notas: f.get("notas"),
       pliego_min: v.pliego_min,
+      costos: Object.fromEntries(["macula_arranque", "macula_porcentaje", "costo_plancha", "costo_arranque", "costo_millar", "costo_clic", "costo_minimo"].map((k) => [k, Math.max(0, num(f.get(k), 0))])),
     };
     if (!m) while (estado.maquinas.some((x) => x.id === datos.id)) datos.id += "-2";
     if (datos.pinza + datos.cola >= datos.pliego_max.alto || 2 * datos.lateral >= datos.pliego_max.ancho) { e.preventDefault(); avisar("Los márgenes ocupan todo el pliego"); return; }
@@ -1340,6 +1496,10 @@ function dialogoPapel(p, main) {
       <label class="campo"><span>Calibre (µm)</span><input type="number" step="1" min="1" name="calibre" required value="${v.calibre_um}"><small>Micras: 0,1 mm = 100 µm</small></label>
     </div>
     ${interruptor("pp-estucado", "Estucado (brillante, mate o satinado)", v.estucado)}
+    <div class="fila">
+      <label class="campo"><span>Formato de compra (mm)</span><input type="text" name="compra" value="${v.pliegos?.[0] ? `${v.pliegos[0].ancho}x${v.pliegos[0].alto}` : "700x1000"}" placeholder="700x1000"></label>
+      <label class="campo"><span>Precio por pliego de compra</span><input type="number" min="0" step="any" name="precio" value="${v.precio ?? 0}"></label>
+    </div>
     <div class="campo"><span>Fibra</span>${chips("fibra", [["", "Sin indicar"], ["larga", "Larga"], ["corta", "Corta"]], v.fibra || "")}</div>
     <label class="campo"><span>Notas</span><input type="text" name="notas" value="${esc(v.notas)}"></label>
     <div class="acciones"><button class="boton boton-claro" value="cancelar" formnovalidate>Cancelar</button><button class="boton" value="guardar">Guardar</button></div>
@@ -1350,7 +1510,9 @@ function dialogoPapel(p, main) {
   $("#pp-form").addEventListener("submit", (e) => {
     if (e.submitter?.value !== "guardar") return;
     const f = new FormData(e.target);
-    const datos = { ...v, nombre: String(f.get("nombre")).trim(), gramaje: num(f.get("gramaje")), calibre_um: num(f.get("calibre")), estucado: $("#pp-estucado").checked, fibra: fibra || null, notas: f.get("notas") };
+    const [ca, cb] = String(f.get("compra") || "").toLowerCase().split(/[x×]/).map((x) => num(x, 0));
+    const datos = { ...v, nombre: String(f.get("nombre")).trim(), gramaje: num(f.get("gramaje")), calibre_um: num(f.get("calibre")), estucado: $("#pp-estucado").checked, fibra: fibra || null, notas: f.get("notas"),
+      pliegos: ca > 0 && cb > 0 ? [{ ancho: ca, alto: cb }] : v.pliegos, precio: Math.max(0, num(f.get("precio"), 0)) };
     if (!p) { datos.id = slug(datos.nombre); while (estado.papeles.some((x) => x.id === datos.id)) datos.id += "-2"; estado.papeles.push(datos); }
     else Object.assign(p, datos);
     guardarCatalogos();
