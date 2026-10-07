@@ -4,6 +4,7 @@ Software de imposición automática para imprenta: volantes, tarjetas, plantas o
 
 - Planeación completa: [docs/PLANEACION.md](docs/PLANEACION.md)
 - Motor: `crates/montajes-core` (Rust). Línea de comandos: `crates/montajes-cli`.
+- Diagramación de libros (web): del manuscrito en Word, Markdown o texto al interior compuesto con [Typst](https://typst.app) en el navegador (typst.ts), cuadrado en cuadernillos y con TrimBox, listo para montar en Libros.
 - App web: `web/` (estática; el motor corre en el navegador vía WebAssembly, `crates/montajes-web`). Se reconstruye con `scripts/construir-web.sh` y se prueba con `python3 -m http.server -d web`.
 
 ## Uso rápido

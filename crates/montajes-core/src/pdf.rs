@@ -209,6 +209,36 @@ impl Fuente {
     }
 }
 
+/// Declara TrimBox y BleedBox en un PDF cuyas páginas se compusieron con el
+/// rebase incluido en la MediaBox (el interior que sale de la diagramación):
+/// el corte queda `rebase_mm` hacia adentro de cada borde.
+pub fn fijar_cajas(bytes: &[u8], rebase_mm: f64) -> Resultado<Vec<u8>> {
+    let mut doc = Document::load_mem(bytes)?;
+    if doc.is_encrypted() {
+        return Err(Error::Invalido("el PDF está protegido con contraseña".into()));
+    }
+    let r = mm_a_pt(rebase_mm.max(0.0));
+    let numero = |v: f64| Object::Real(v as f32);
+    let arreglo = |c: Caja| Object::Array(vec![numero(c.x0), numero(c.y0), numero(c.x1), numero(c.y1)]);
+    for (n, id) in doc.get_pages() {
+        let media = heredado(&doc, id, b"MediaBox")
+            .and_then(|o| caja(&doc, &o))
+            .ok_or_else(|| Error::Invalido("página sin MediaBox".into()))?;
+        if media.ancho() <= 2.0 * r || media.alto() <= 2.0 * r {
+            return Err(Error::Invalido(format!("la página {n} es más pequeña que el rebase")));
+        }
+        let corte = Caja { x0: media.x0 + r, y0: media.y0 + r, x1: media.x1 - r, y1: media.y1 - r };
+        let pagina = doc.get_dictionary_mut(id)?;
+        pagina.set("MediaBox", arreglo(media));
+        pagina.set("TrimBox", arreglo(corte));
+        pagina.set("BleedBox", arreglo(media));
+        pagina.remove(b"CropBox");
+    }
+    let mut salida = Vec::new();
+    doc.save_to(&mut salida)?;
+    Ok(salida)
+}
+
 /// Atributo de página heredable (MediaBox, CropBox, Rotate, Resources).
 /// Une documentos en uno: renumera los objetos de cada uno, copia en cada
 /// página los atributos que heredaba (cajas, giro, recursos) y arma un árbol
@@ -1002,6 +1032,33 @@ mod pruebas {
         let b = Caja { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0 };
         let m = matriz_colocacion(&b, 90, 0.0, 0.0);
         assert_eq!(aplicar(&m, 0.0, 50.0), (50.0, 100.0));
+    }
+
+    #[test]
+    fn fijar_cajas_pone_el_corte_dentro_del_rebase() {
+        let mut doc = Document::with_version("1.7");
+        let paginas = doc.new_object_id();
+        let contenido = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+        let pagina = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => paginas, "Contents" => contenido,
+            "MediaBox" => vec![0.into(), 0.into(), Object::Real(mm_a_pt(154.0) as f32), Object::Real(mm_a_pt(216.0) as f32)],
+        });
+        doc.objects.insert(
+            paginas,
+            Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![pagina.into()], "Count" => 1 }),
+        );
+        let catalogo = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => paginas });
+        doc.trailer.set("Root", catalogo);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+
+        let fuente = Fuente::desde_bytes(&fijar_cajas(&bytes, 3.0).unwrap()).unwrap();
+        let p = &fuente.paginas[0];
+        assert!(p.tiene_trimbox);
+        let t = p.tamano_corte();
+        assert!((t.ancho - 148.0).abs() < 0.01 && (t.alto - 210.0).abs() < 0.01, "{t}");
+        assert!((p.rebase_disponible() - 3.0).abs() < 0.01);
+        assert!(fijar_cajas(&bytes, 200.0).is_err());
     }
 
     #[test]

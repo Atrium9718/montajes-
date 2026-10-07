@@ -158,6 +158,25 @@ export function cotizar(peticion) {
 }
 
 /**
+ * Marca TrimBox y BleedBox en el interior que sale de la diagramación
+ * (páginas compuestas con el rebase dentro de la MediaBox).
+ * @param {Uint8Array} pdf
+ * @param {number} rebase_mm
+ * @returns {Uint8Array}
+ */
+export function fijar_cajas(pdf, rebase_mm) {
+    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.fijar_cajas(ptr0, len0, rebase_mm);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * Carátula con su tiro (exterior) y retiro (interior). El interior se arma
  * reflejado: visto desde adentro, la segunda de forros queda a la izquierda.
  * @param {Uint8Array} pdf

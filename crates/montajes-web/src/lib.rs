@@ -146,6 +146,13 @@ pub fn cotizar(peticion: &str) -> R<String> {
     serde_json::to_string(&cotizacion::cotizar(&p).map_err(error)?).map_err(error)
 }
 
+/// Marca TrimBox y BleedBox en el interior que sale de la diagramación
+/// (páginas compuestas con el rebase dentro de la MediaBox).
+#[wasm_bindgen]
+pub fn fijar_cajas(pdf: &[u8], rebase_mm: f64) -> R<Vec<u8>> {
+    pdf::fijar_cajas(pdf, rebase_mm).map_err(error)
+}
+
 /// Pliegos de máquina que salen de un pliego de compra.
 #[wasm_bindgen]
 pub fn salen_de(compra_ancho: f64, compra_alto: f64, pliego_ancho: f64, pliego_alto: f64) -> u32 {

@@ -4,6 +4,7 @@
 
 import iniciarMotor, * as motor from "./motor/montajes_web.js";
 import { aMaquina, buscarMaquinas } from "./maquinas-catalogo.js";
+import { vistaDiagramacion } from "./diagramacion.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -22,8 +23,10 @@ const almacen = {
 const iccDB = {
   abrir() {
     return new Promise((ok, mal) => {
-      const r = indexedDB.open("montajes", 1);
-      r.onupgradeneeded = () => r.result.createObjectStore("icc");
+      const r = indexedDB.open("montajes", 2);
+      r.onupgradeneeded = () => {
+        for (const almacen of ["icc", "fuentes"]) if (!r.result.objectStoreNames.contains(almacen)) r.result.createObjectStore(almacen);
+      };
       r.onsuccess = () => ok(r.result);
       r.onerror = () => mal(r.error);
     });
@@ -34,6 +37,23 @@ const iccDB = {
     catch { return null; }
   },
   async borrar(id) { try { const db = await this.abrir(); db.transaction("icc", "readwrite").objectStore("icc").delete(id); } catch { /* sin almacenamiento */ } },
+};
+
+// Fuentes tipográficas propias para la diagramación (mismo IndexedDB).
+const fuentesDB = {
+  async poner(nombre, valor) { const db = await iccDB.abrir(); return new Promise((ok, mal) => { const t = db.transaction("fuentes", "readwrite"); t.objectStore("fuentes").put(valor, nombre); t.oncomplete = ok; t.onerror = () => mal(t.error); }); },
+  async borrar(nombre) { try { const db = await iccDB.abrir(); db.transaction("fuentes", "readwrite").objectStore("fuentes").delete(nombre); } catch { /* sin almacenamiento */ } },
+  async todas() {
+    try {
+      const db = await iccDB.abrir();
+      return await new Promise((ok) => {
+        const almacen = db.transaction("fuentes").objectStore("fuentes");
+        const claves = almacen.getAllKeys(), valores = almacen.getAll();
+        valores.onsuccess = () => ok(claves.result.map((k, i) => [k, valores.result[i]]));
+        valores.onerror = () => ok([]);
+      });
+    } catch { return []; }
+  },
 };
 
 const estado = {
@@ -260,7 +280,29 @@ const formas = {
 };
 
 // ───────────── Navegación ─────────────
-const vistas = { inicio: vistaInicio, piezas: vistaPiezas, libro: vistaLibro, portada: vistaPortada, catalogos: vistaCatalogos };
+const vistas = { inicio: vistaInicio, piezas: vistaPiezas, diagramar: (main) => vistaDiagramacion(main, ayudasDiagramacion()), libro: vistaLibro, portada: vistaPortada, catalogos: vistaCatalogos };
+
+// Lo que la diagramación usa de la app (sin acoplarla al resto de vistas).
+function ayudasDiagramacion() {
+  return {
+    $, $$, esc, mm, num, chips, conectarChips, interruptor, avisar, descargar, respirar, cargarPdfjs, motor, estado, preferir, fuentesDB,
+    enviarALibro(archivo) {
+      const t = estado.libro;
+      analizarArchivo(t, archivo, true);
+      t.roles = t.info ? rolesIniciales(t.info) : [];
+      t.plan = null;
+      t.op.cuadernillos = "";
+      // La firma la elige el montaje según la máquina: el cuadre en
+      // cuadernillos de la diagramación ya deja la cuenta exacta.
+      t.op.firma = "auto";
+      location.hash = "#libro";
+    },
+    enviarAPortada(ancho, alto, paginas) {
+      Object.assign(estado.portada.op, { ancho, alto, paginas, lomo: "" });
+      location.hash = "#portada";
+    },
+  };
+}
 function navegar() {
   const nombre = location.hash.slice(1) || "inicio";
   const vista = vistas[nombre] || vistaInicio;
@@ -280,6 +322,7 @@ function vistaInicio(main) {
     ["piezas", formas.estrella("var(--naranja)"), "Volantes y tarjetas", "Cuántas caben por pliego, tiro y retiro, marcas y tira de color."],
     ["libro", formas.flor("var(--azul)"), "Revistas a caballete", "Firmas anidadas con creep calculado según el papel."],
     ["libro", formas.cuadro("var(--lavanda)"), "Libros al lomo o cosidos", "Firmas alzadas, fresado y marcas de alzado en escalera."],
+    ["diagramar", formas.destello("var(--naranja)"), "Diagramación de libros", "Del manuscrito en Word al interior compuesto y cuadrado en cuadernillos."],
     ["portada", formas.circulo("var(--lima)"), "Portadas", "Lomo automático, solapas, tapa dura y plantilla para el diseñador."],
   ];
   main.innerHTML = `

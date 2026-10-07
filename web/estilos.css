@@ -101,7 +101,7 @@ a { color: inherit; }
     position: fixed; left: 16px; right: 16px; bottom: 16px; justify-content: space-between;
     box-shadow: 0 10px 30px rgb(0 0 0 / .25);
   }
-  .nav a { padding: 10px 10px; font-size: 13px; }
+  .nav a { padding: 10px 7px; font-size: 12.5px; }
 }
 
 /* ── Orbes ── */
@@ -124,7 +124,8 @@ a { color: inherit; }
 .hero > *:not(.orbe) { position: relative; }
 .hero p.lead { font-size: 20px; max-width: 560px; margin-top: 18px; color: var(--tinta-suave); }
 .hero .acciones { margin-top: 28px; display: flex; gap: 12px; flex-wrap: wrap; }
-.productos { grid-template-columns: repeat(4, 1fr); margin-top: 20px; }
+.productos { grid-template-columns: repeat(5, 1fr); margin-top: 20px; }
+@media (max-width: 1240px) { .productos { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 1000px) { .productos { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 520px) { .productos { grid-template-columns: 1fr; } .hero { padding: 36px 24px; } }
 .producto { text-decoration: none; display: flex; flex-direction: column; gap: 14px; min-height: 220px; transition: transform .15s ease; }
@@ -343,3 +344,24 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; margin-t
 .pagina-rol select { font-size: 12px; padding: 6px; border-radius: 8px; }
 .caratula { display: grid; gap: 14px; }
 .explicacion-clara { font-size: 15px; line-height: 1.5; }
+
+/* Diagramación */
+textarea {
+  width: 100%; font: inherit; font-size: 15px; color: var(--tinta); background: var(--superficie-2);
+  border: 1px solid transparent; border-radius: 12px; padding: 11px 12px; resize: vertical;
+}
+textarea:hover { border-color: var(--linea); }
+.fila-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.fila-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 560px) { .fila-2, .fila-4 { grid-template-columns: 1fr 1fr; } }
+.enlace { appearance: none; background: none; border: 0; padding: 0; font: inherit; color: var(--azul); text-decoration: underline; cursor: pointer; }
+.lista-capitulos { margin: 0; padding-left: 22px; display: grid; gap: 4px; font-size: 14px; max-height: 260px; overflow: auto; }
+.componiendo { display: flex; align-items: center; gap: 18px; }
+.componiendo .orbe { width: 56px; height: 56px; flex: none; filter: blur(10px); }
+.componiendo p { font-size: 17px; }
+.pliego-libro { display: grid; grid-template-columns: 1fr 1fr; width: 100%; max-width: 760px; box-shadow: 0 10px 30px rgb(0 0 0 / .12); }
+.pliego-libro > * { width: 100%; height: auto; display: block; background: #fff; }
+.pliego-libro > :first-child { box-shadow: inset -14px 0 18px -14px rgb(0 0 0 / .25); }
+.pliego-libro .pagina-vacia { background: transparent; box-shadow: none; }
+.pliego-libro .pagina-cargando { background: linear-gradient(90deg, #f3f3ef, #fafaf7, #f3f3ef); }
+.paginador input[type="range"] { width: 140px; accent-color: var(--naranja); }
