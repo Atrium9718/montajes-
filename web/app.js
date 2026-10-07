@@ -353,7 +353,7 @@ function tarjetaArchivo(archivo, info, idQuitar) {
     <button class="boton boton-claro boton-chico" id="${idQuitar}" type="button">Cambiar</button></div>`;
 }
 
-function analizarArchivo(trabajo, archivo) {
+function analizarArchivo(trabajo, archivo, formatosMixtos = false) {
   trabajo.archivo = archivo;
   trabajo.mini = {};
   trabajo.pdfjs = null;
@@ -361,7 +361,7 @@ function analizarArchivo(trabajo, archivo) {
   trabajo.cara = 0;
   try {
     trabajo.info = JSON.parse(motor.analizar(archivo.bytes));
-    if (!trabajo.info.formato) trabajo.error = "Las páginas del PDF tienen tamaños distintos. Revisa que todas tengan el mismo formato final (TrimBox).";
+    if (!trabajo.info.formato && !formatosMixtos) trabajo.error = "Las páginas del PDF tienen tamaños distintos. Revisa que todas tengan el mismo formato final (TrimBox).";
     revisarArchivo(trabajo);
   } catch (e) {
     trabajo.info = null;
@@ -790,6 +790,174 @@ function calcularPiezas() {
   });
 }
 
+// ───────────── Páginas del libro: tripa y carátula ─────────────
+const ROLES = [
+  ["tripa", "Tripa"],
+  ["portada", "Portada · tiro"], ["contraportada", "Contraportada · tiro"], ["lomo", "Lomo · tiro"],
+  ["solapa_portada", "Solapa de portada · tiro"], ["solapa_contraportada", "Solapa de contraportada · tiro"],
+  ["exterior", "Carátula exterior completa · tiro"],
+  ["segunda", "2.ª de forros · retiro"], ["tercera", "3.ª de forros · retiro"],
+  ["solapa_portada_interior", "Solapa de portada · retiro"], ["solapa_contraportada_interior", "Solapa de contraportada · retiro"],
+  ["interior", "Carátula interior completa · retiro"],
+  ["excluir", "No usar"],
+];
+const ROLES_CARATULA = ROLES.map(([r]) => r).filter((r) => r !== "tripa" && r !== "excluir");
+const NOMBRE_ROL = Object.fromEntries(ROLES);
+
+/** Propuesta inicial: las páginas de otro tamaño (pliegos extendidos) son la carátula. */
+function rolesIniciales(info) {
+  const clave = (p) => `${Math.round(p.ancho)}x${Math.round(p.alto)}`;
+  const cuenta = {};
+  for (const p of info.paginas) cuenta[clave(p)] = (cuenta[clave(p)] || 0) + 1;
+  const comun = Object.entries(cuenta).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const distintas = info.paginas.map((p, i) => [i, clave(p)]).filter(([, k]) => k !== comun).map(([i]) => i);
+  const roles = info.paginas.map(() => "tripa");
+  if (distintas[0] != null) roles[distintas[0]] = "exterior";
+  if (distintas[1] != null) roles[distintas[1]] = "interior";
+  for (const i of distintas.slice(2)) roles[i] = "excluir";
+  return roles;
+}
+
+const tripaDe = (t) => (t.roles || []).map((r, i) => (r === "tripa" ? i : -1)).filter((i) => i >= 0);
+function formatoTripa(t) {
+  const i = tripaDe(t)[0];
+  const p = t.info?.paginas[i ?? 0];
+  return p ? { ancho: p.ancho, alto: p.alto } : t.info?.formato;
+}
+function cuadernillosDe(o) {
+  return String(o.cuadernillos || "").split(/[^0-9]+/).map(Number).filter((n) => n > 0);
+}
+function textoCuadernillos(t) {
+  const lista = cuadernillosDe(t.op);
+  const tripa = tripaDe(t).length;
+  if (!lista.length) return "Vacío: la app elige la firma más grande que quepa.";
+  const suma = lista.reduce((a, b) => a + b, 0);
+  const malos = lista.filter((n) => ![4, 8, 16, 32, 64].includes(n));
+  if (malos.length) return `Cuadernillos de ${malos.join(", ")} páginas no son válidos: use 4, 8, 16, 32 o 64.`;
+  if (suma < tripa) return `Suman ${suma} páginas y la tripa tiene ${tripa}: faltan ${tripa - suma}.`;
+  return `${lista.length} cuadernillos, ${suma} páginas${suma > tripa ? ` (${suma - tripa} en blanco al final)` : ""}.`;
+}
+
+function bloquePaginasLibro(t) {
+  const roles = t.roles || [];
+  const n = roles.length;
+  const tripa = tripaDe(t).length;
+  const caratula = roles.filter((r) => ROLES_CARATULA.includes(r)).length;
+  return `<section class="tarjeta paso paginas-libro">
+    <div class="paso-titulo"><span class="paso-num">✦</span><h3>¿Qué es cada página?</h3></div>
+    <p class="tenue" style="font-size:14px"><b>${tripa}</b> de tripa · <b>${caratula}</b> de carátula${roles.includes("excluir") ? ` · ${roles.filter((r) => r === "excluir").length} sin usar` : ""}. Marca la portada y la contraportada (tiro) y sus interiores (retiro).</p>
+    <div class="chips">
+      <button class="chip" type="button" data-preset="tripa">Todo es tripa</button>
+      ${n >= 6 ? `<button class="chip" type="button" data-preset="extremos">Carátula: 1.ª y última</button>` : ""}
+      ${n >= 8 ? `<button class="chip" type="button" data-preset="forros">Carátula con interiores: 1, 2, penúltima, última</button>` : ""}
+    </div>
+    <div class="grilla-paginas">${roles.map((r, i) => `<label class="pagina-rol ${r === "tripa" ? "" : `rol-${r === "excluir" ? "excluir" : "caratula"}`}">
+      <span class="pagina-mini">${t.mini?.[i] ? `<img src="${t.mini[i]}" alt="">` : ""}<b>${i + 1}</b></span>
+      <select data-rol="${i}" aria-label="Página ${i + 1}">${ROLES.map(([v, txt]) => `<option value="${v}" ${v === r ? "selected" : ""}>${txt}</option>`).join("")}</select>
+    </label>`).join("")}</div>
+  </section>`;
+}
+
+function conectarPaginasLibro(main, t) {
+  const redibujar = () => { const y = window.scrollY; vistaLibro(main); window.scrollTo(0, y); };
+  $$("[data-rol]", main).forEach((sel) => sel.addEventListener("change", (e) => {
+    e.stopPropagation();
+    const i = Number(sel.dataset.rol), rol = sel.value;
+    // Cada panel de la carátula es una sola página: la anterior queda sin usar.
+    if (ROLES_CARATULA.includes(rol)) t.roles.forEach((r, k) => { if (r === rol && k !== i) t.roles[k] = "excluir"; });
+    t.roles[i] = rol;
+    redibujar();
+  }));
+  $$("[data-preset]", main).forEach((b) => b.addEventListener("click", () => {
+    const n = t.roles.length;
+    t.roles = t.roles.map(() => "tripa");
+    if (b.dataset.preset === "extremos") { t.roles[0] = "portada"; t.roles[n - 1] = "contraportada"; }
+    if (b.dataset.preset === "forros") { t.roles[0] = "portada"; t.roles[1] = "segunda"; t.roles[n - 2] = "tercera"; t.roles[n - 1] = "contraportada"; }
+    redibujar();
+  }));
+  // Miniaturas de todas las páginas (hasta 300) para reconocerlas.
+  if (t.info) {
+    const indices = t.info.paginas.slice(0, 300).map((_, i) => i);
+    pedirMiniaturas(t, indices, () => {
+      $$(".pagina-mini", main).forEach((el, i) => {
+        if (t.mini?.[i] && !el.querySelector("img")) el.insertAdjacentHTML("afterbegin", `<img src="${t.mini[i]}" alt="">`);
+      });
+      calcularLibro();
+    });
+  }
+}
+
+function peticionCaratula(maquina, montar) {
+  const t = estado.libro, o = t.op;
+  const asignacion = Object.fromEntries(ROLES_CARATULA.map((r) => { const i = t.roles.indexOf(r); return [r, i < 0 ? null : i]; }));
+  const tripaPapel = estado.papeles.find((p) => p.id === $("#lb-papel")?.value);
+  const cubierta = estado.papeles.find((p) => p.id === o.papelCaratula);
+  const lomoManual = o.lomoCaratula === "" || o.lomoCaratula == null ? null : num(o.lomoCaratula);
+  return {
+    formato: formatoTripa(t),
+    lomo: o.encuadernacion === "caballete" ? 0 : lomoManual,
+    paginas: t.plan?.plan?.paginas_libro ?? tripaDe(t).length,
+    calibre_um: tripaPapel?.calibre_um ?? null, calibre_portada_um: cubierta?.calibre_um ?? null,
+    tipo: o.tapaDura ? { tapa_dura: { carton: 2.5, escuadra: 3, vuelta: 15, bisagra: 8 } } : { rustica: { solapa: num(o.solapaCaratula, 0) } },
+    rebase: o.rebase, derecha_a_izquierda: o.rtl, marcas: true,
+    titulo: `${base(t.archivo?.nombre)} carátula`, fecha: ahora(), maquina, correcciones: correcciones(),
+    asignacion, montar,
+  };
+}
+
+function pintarCaratula() {
+  const caja = $("#lb-caratula");
+  if (!caja) return;
+  const t = estado.libro, o = t.op;
+  const asignadas = (t.roles || []).map((r, i) => [r, i]).filter(([r]) => ROLES_CARATULA.includes(r));
+  if (!asignadas.length || !t.info) { caja.innerHTML = ""; return; }
+  const maquina = maquinaElegida("lb-maquina");
+  let calculo = null, error = "";
+  try { calculo = JSON.parse(motor.calcular_portada_json(JSON.stringify(peticionCaratula(maquina, false)))); }
+  catch (e) { error = String(e.message || e); }
+  const tiro = asignadas.filter(([r]) => !["segunda", "tercera", "interior", "solapa_portada_interior", "solapa_contraportada_interior"].includes(r));
+  const retiro = asignadas.filter(([r]) => !tiro.some(([x]) => x === r));
+  const opcionesPapel = estado.papeles.map((p) => `<option value="${esc(p.id)}" ${p.id === o.papelCaratula ? "selected" : ""}>${esc(p.nombre)} · ${p.calibre_um} µm</option>`).join("");
+  caja.innerHTML = `<section class="tarjeta caratula">
+    <div class="paso-titulo"><span class="orbe cotizacion-orbe" aria-hidden="true"></span><div><h3>Carátula</h3><p class="tenue" style="font-size:14px">Tiro: ${tiro.map(([r, i]) => `${NOMBRE_ROL[r].split(" · ")[0]} (pág. ${i + 1})`).join(", ") || "—"}<br>Retiro: ${retiro.map(([r, i]) => `${NOMBRE_ROL[r].split(" · ")[0]} (pág. ${i + 1})`).join(", ") || "sin interior impreso"}</p></div></div>
+    <div class="fila">
+      <label class="campo"><span>Papel de la carátula</span><select data-car="papelCaratula"><option value="">Sin sumar al lomo</option>${opcionesPapel}</select></label>
+      <label class="campo"><span>Solapas (mm)</span><input type="number" min="0" data-car="solapaCaratula" value="${o.solapaCaratula ?? 0}" ${o.tapaDura ? "disabled" : ""}></label>
+    </div>
+    <div class="fila">
+      <label class="campo"><span>Lomo manual (mm)</span><input type="number" min="0" step="0.1" data-car="lomoCaratula" value="${o.lomoCaratula ?? ""}" placeholder="${o.encuadernacion === "caballete" ? "0 (caballete)" : "se calcula con el papel"}" ${o.encuadernacion === "caballete" ? "disabled" : ""}></label>
+      <div class="campo" style="align-content:end">${interruptor("car-tapa-dura", "Tapa dura", o.tapaDura)}</div>
+    </div>
+    ${error ? `<div class="aviso-suave">${esc(/calibre|páginas/.test(error) ? "Elige el papel de la tripa (o escribe el lomo a mano) para calcular la carátula." : error)}</div>` : ""}
+    ${calculo ? `<p class="explicacion-clara">Carátula extendida de <b>${mm(calculo.tamano.ancho, 1)} × ${mm(calculo.tamano.alto, 1)} mm</b> con lomo de <span class="resaltado">${mm(calculo.lomo, 2)} mm</span>. El retiro se arma reflejado: al voltear el pliego, la 2.ª de forros cae detrás de la portada.</p>
+    <div class="acciones-resultado">
+      <button class="boton" type="button" id="car-montada">Descargar carátula montada en ${esc(maquina?.nombre || "la máquina")}</button>
+      <button class="boton boton-claro" type="button" id="car-sola">Descargar carátula sola</button>
+    </div>` : ""}
+  </section>`;
+  $$("[data-car]", caja).forEach((el) => el.addEventListener("change", (e) => {
+    e.stopPropagation();
+    o[el.dataset.car] = el.value;
+    setTimeout(pintarCaratula, 0);
+  }));
+  $("#car-tapa-dura", caja)?.addEventListener("change", (e) => { e.stopPropagation(); o.tapaDura = e.target.checked; setTimeout(pintarCaratula, 0); });
+  const descargarCaratula = async (montar, boton) => {
+    const texto = boton.textContent;
+    boton.disabled = true; boton.textContent = "Generando…";
+    await respirar();
+    try {
+      const icc = montar && maquina ? (await iccDB.leer(maquina.id)) || new Uint8Array() : new Uint8Array();
+      const r = motor.generar_caratula(t.archivo.bytes, JSON.stringify(peticionCaratula(maquina, montar)), icc);
+      const inf = JSON.parse(r.informe);
+      descargar(r.pdf, `${base(t.archivo.nombre)}-caratula${montar ? "-pliego" : ""}.pdf`);
+      avisar(inf.por_pliego ? `Carátula lista: ${inf.por_pliego} por pliego${inf.con_retiro ? ", con tiro y retiro" : ""}` : `Carátula lista${inf.con_retiro ? " (tiro y retiro)" : ""}`);
+    } catch (err) { avisar(`${err.message || err}`); }
+    boton.disabled = false; boton.textContent = texto;
+  };
+  $("#car-montada", caja)?.addEventListener("click", (e) => descargarCaratula(true, e.currentTarget));
+  $("#car-sola", caja)?.addEventListener("click", (e) => descargarCaratula(false, e.currentTarget));
+}
+
 // ───────────── Cotización ─────────────
 const pesos = (v) => "$" + Math.round(v).toLocaleString("es-CO");
 const UNIDADES = [["ejemplar", "por ejemplar"], ["millar", "por millar"], ["pliego", "por pliego"], ["fijo", "valor fijo"]];
@@ -931,10 +1099,11 @@ function vistaLibro(main) {
     <div class="trabajo">
       <div class="panel">
         <section class="tarjeta paso ${t.info ? "listo" : ""}">
-          <div class="paso-titulo"><span class="paso-num">1</span><h3>Tripa (interior)</h3></div>
-          ${t.archivo ? tarjetaArchivo(t.archivo, t.info, "lb-cambiar") : zonaArchivo("lb-archivo", "Sube el PDF del interior")}
+          <div class="paso-titulo"><span class="paso-num">1</span><h3>PDF del libro</h3></div>
+          ${t.archivo ? tarjetaArchivo(t.archivo, t.info, "lb-cambiar") : zonaArchivo("lb-archivo", "Sube el PDF del libro (con o sin carátula)")}
           ${bloquePreflight(t)}
         </section>
+        ${t.info ? bloquePaginasLibro(t) : ""}
         <section class="tarjeta paso">
           <div class="paso-titulo"><span class="paso-num">2</span><h3>Encuadernación</h3></div>
           ${chips("encuadernacion", [["caballete", "Caballete"], ["lomo", "Al lomo (PUR)"], ["cosido", "Cosido"]], o.encuadernacion)}
@@ -944,6 +1113,7 @@ function vistaLibro(main) {
             ${papeles.length ? "" : `<small><a href="#catalogos">Agrega papeles</a> para calcular el lomo y el creep.</small>`}
           </label>
           <div class="campo"><span>Páginas por firma</span>${chips("firma", [["auto", "Auto"], ["4", "4"], ["8", "8"], ["16", "16"], ["32", "32"], ["64", "64"]], o.firma)}</div>
+          <label class="campo"><span>Cuadernillos a mano (opcional)</span><input type="text" id="lb-cuadernillos" value="${esc(o.cuadernillos || "")}" placeholder="Ej.: 16,16,16,8" autocomplete="off"><small>${textoCuadernillos(t)}</small></label>
           <div class="campo"><span>Firmas por pliego</span>${chips("aprovechamiento", [["auto", "Auto"], ["una", "Una"], ["repetir", "Repetir"], ["tira_retira", "Tira y retira"]], o.aprovechamiento)}<small>Auto monta en tira y retira (una sola plancha para las dos caras) cuando la firma cabe dos veces lado a lado.</small></div>
           <details class="avanzado"><summary>Márgenes, lectura y marcas</summary>
             <div class="paso">
@@ -961,14 +1131,17 @@ function vistaLibro(main) {
           ${bloqueCorrecciones("lb")}
         </section>
       </div>
-      <div class="columna-resultado"><div class="resultado" id="lb-resultado"></div><div id="lb-cotizacion"></div></div>
+      <div class="columna-resultado"><div class="resultado" id="lb-resultado"></div><div id="lb-caratula"></div><div id="lb-cotizacion"></div></div>
     </div>`;
-  conectarArchivo("lb-archivo", (a) => { analizarArchivo(t, a); vistaLibro(main); });
+  conectarArchivo("lb-archivo", (a) => { analizarArchivo(t, a, true); t.roles = t.info ? rolesIniciales(t.info) : []; vistaLibro(main); });
+  conectarPaginasLibro(main, t);
   $("#lb-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaLibro(main); });
   conectarCorrecciones(main, () => vistaLibro(main));
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file" || el.dataset.correccion) return;
+    if (el.type === "file" || el.dataset.correccion || el.dataset.rol) return;
     const antes = { rebase: o.rebase, maquina: estado.preferencias.maquina };
+    o.cuadernillos = $("#lb-cuadernillos").value.trim();
+    $("#lb-cuadernillos").nextElementSibling.textContent = textoCuadernillos(t);
     o.rebase = num($("#lb-rebase").value, 3);
     o.refile = num($("#lb-refile").value, 3);
     o.fresado = num($("#lb-fresado").value, 3);
@@ -988,8 +1161,11 @@ function vistaLibro(main) {
 function peticionLibro(maquina, info) {
   const o = estado.libro.op;
   const papel = estado.papeles.find((p) => p.id === $("#lb-papel")?.value);
+  const tripa = tripaDe(estado.libro);
+  const enOrden = tripa.length === info.paginas.length;
   return {
-    maquina, formato: info.formato, paginas: info.paginas.length, encuadernacion: o.encuadernacion,
+    maquina, formato: formatoTripa(estado.libro), paginas: tripa.length, encuadernacion: o.encuadernacion,
+    mapa: enOrden ? [] : tripa, cuadernillos: cuadernillosDe(o),
     firma: o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
     derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: o.aprovechamiento || "auto",
@@ -1003,7 +1179,7 @@ function calcularLibro() {
   if (!caja) return;
   const maquina = maquinaElegida("lb-maquina");
   t.plan = null;
-  if (t.info?.formato && maquina && !t.error) {
+  if (t.info && tripaDe(t).length && maquina && !t.error) {
     try { t.plan = JSON.parse(motor.planear_libro(JSON.stringify(peticionLibro(maquina, t.info)))); }
     catch (e) { t.plan = null; caja.dataset.error = String(e.message || e); }
   }
@@ -1026,7 +1202,7 @@ function calcularLibro() {
     const multiples = p.firmas.filter((f) => f.copias > 1);
     if (multiples.length) {
       const tr = multiples.some((f) => f.tira_retira);
-      explicacion += ` ${multiples.length === p.firmas.length ? "Cada pliego" : `En ${multiples.length} firmas, cada pliego`} da <span class="resaltado">${Math.max(...multiples.map((f) => f.copias))} firmas${tr ? " en tira y retira" : ""}</span>: ${p.juegos_planchas} juegos de planchas y ${mm(p.pliegos_por_ejemplar, 2)} pliegos por ejemplar.`;
+      explicacion += ` ${multiples.length === p.firmas.length ? "Cada pliego" : `En ${multiples.length} ${multiples.length === 1 ? "firma" : "firmas"}, cada pliego`} da <span class="resaltado">${Math.max(...multiples.map((f) => f.copias))} firmas${tr ? " en tira y retira" : ""}</span>: ${p.juegos_planchas} juegos de planchas y ${mm(p.pliegos_por_ejemplar, 2)} pliegos por ejemplar.`;
     }
   }
   const tercera = !p ? "" : t.op.encuadernacion === "caballete"
@@ -1049,6 +1225,7 @@ function calcularLibro() {
     ${listaAvisos(t.plan?.avisos)}
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver las firmas" : "Sube el interior para ver las firmas", true)}`;
   pintarCotizacion("libro");
+  pintarCaratula();
   const carasLb = t.plan?.plan?.caras;
   if (carasLb?.length) pedirMiniaturas(t, carasLb[Math.min(t.cara, carasLb.length - 1)].ubicaciones.map((u) => u.pagina), calcularLibro);
   if (!pintar(caja, html)) return;

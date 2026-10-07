@@ -392,6 +392,11 @@ struct PeticionLibro {
     correcciones: Correcciones,
     #[serde(default)]
     aprovechamiento: Aprovechamiento,
+    #[serde(default)]
+    cuadernillos: Vec<u32>,
+    /// Páginas del PDF que forman la tripa, en orden (vacío = todas).
+    #[serde(default)]
+    mapa: Vec<usize>,
 }
 
 #[derive(Serialize)]
@@ -409,7 +414,7 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
         pliego: pliego(&p.maquina, p.pliego)?,
         margenes: Margenes::de_maquina(&p.maquina),
         pagina: p.formato,
-        paginas: p.paginas,
+        paginas: if p.mapa.is_empty() { p.paginas } else { p.mapa.len() as u32 },
         encuadernacion: p.encuadernacion,
         firma: p.firma,
         rebase: p.rebase,
@@ -419,6 +424,8 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
         derecha_a_izquierda: p.derecha_a_izquierda,
         marcas: marcas(p.marcas, p.tira_color),
         aprovechamiento: p.aprovechamiento,
+        cuadernillos: p.cuadernillos.clone(),
+        mapa: p.mapa.clone(),
     };
     let plan = firmas::planificar(&parametros).map_err(error)?;
     let lomo = p.calibre_um.map(|c| f64::from(plan.paginas_libro / 2) * c / 1000.0);
@@ -438,9 +445,10 @@ pub fn planear_libro(peticion: &str) -> R<String> {
 pub fn generar_libro(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
     let mut p: PeticionLibro = serde_json::from_str(peticion).map_err(error)?;
     let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
-    let (formato, mut avisos) = fuente.formato_comun(Some(p.formato), p.rebase).map_err(error)?;
+    let tripa: Vec<usize> = if p.mapa.is_empty() { (0..fuente.paginas.len()).collect() } else { p.mapa.clone() };
+    let (formato, mut avisos) = fuente.formato_de(&tripa, Some(p.formato), p.rebase).map_err(error)?;
     p.formato = formato;
-    p.paginas = fuente.paginas.len() as u32;
+    p.paginas = tripa.len() as u32;
     let (par, plan, lomo) = plan_libro(&p)?;
     avisos.extend(plan.avisos.iter().cloned());
     let s = &p.maquina.salida;
@@ -453,7 +461,7 @@ pub fn generar_libro(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
 
 // ───────────────────────── Portada ─────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct PeticionPortada {
     formato: Tamano,
     /// Lomo indicado; si falta se calcula con páginas y calibres.
@@ -577,6 +585,188 @@ pub fn armar_portada(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
     let informe =
         serde_json::to_string(&InformePortada { portada: &c, completa, avisos, pdfx: identificado }).map_err(error)?;
     Ok(Resultado { pdf: bytes, informe })
+}
+
+// ───────────────────────── Carátula del libro ─────────────────────────
+
+/// Qué página del PDF va en cada panel de la carátula (índices desde 0).
+#[derive(Deserialize, Default)]
+struct PaginasCaratula {
+    // Tiro: cara exterior.
+    portada: Option<usize>,
+    contraportada: Option<usize>,
+    lomo: Option<usize>,
+    solapa_portada: Option<usize>,
+    solapa_contraportada: Option<usize>,
+    /// Exterior completo en una sola página (contraportada + lomo + portada).
+    exterior: Option<usize>,
+    // Retiro: cara interior.
+    segunda: Option<usize>,
+    tercera: Option<usize>,
+    solapa_portada_interior: Option<usize>,
+    solapa_contraportada_interior: Option<usize>,
+    /// Interior completo en una sola página.
+    interior: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct PeticionCaratula {
+    #[serde(flatten)]
+    portada: PeticionPortada,
+    /// Página del PDF para cada panel (no se llama «paginas»: ese campo es el
+    /// número de páginas de la tripa, que viene de la petición de portada).
+    #[serde(default)]
+    asignacion: PaginasCaratula,
+    /// Montar la carátula en el pliego de la máquina (tiro y retiro).
+    #[serde(default)]
+    montar: bool,
+}
+
+#[derive(Serialize)]
+struct InformeCaratula<'a> {
+    portada: &'a Portada,
+    con_retiro: bool,
+    /// Carátulas por pliego cuando se montó en la máquina.
+    por_pliego: Option<u32>,
+    pliego: Option<Tamano>,
+    avisos: Vec<String>,
+    pdfx: bool,
+}
+
+/// Carátula con su tiro (exterior) y retiro (interior). El interior se arma
+/// reflejado: visto desde adentro, la segunda de forros queda a la izquierda.
+#[wasm_bindgen]
+pub fn generar_caratula(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    let p: PeticionCaratula = serde_json::from_str(peticion).map_err(error)?;
+    let pp = &p.portada;
+    let exterior = calcular_portada(pp)?;
+    let interior_dims =
+        calcular_portada(&PeticionPortada { derecha_a_izquierda: !pp.derecha_a_izquierda, ..pp.clone() })?;
+    let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
+    let tam = |i: usize| -> R<Tamano> {
+        fuente
+            .paginas
+            .get(i)
+            .map(|x| x.tamano_corte())
+            .ok_or_else(|| error(format!("el PDF no tiene página {}", i + 1)))
+    };
+    let op = marcas(pp.marcas, false);
+    let pg = &p.asignacion;
+    let armar = |c: &Portada,
+                 completa: Option<usize>,
+                 asignar: &[(TipoPanel, Option<usize>)],
+                 nombre: &str|
+     -> R<Option<Cara>> {
+        let mut cara = if let Some(i) = completa {
+            let t = tam(i)?;
+            if (t.ancho - c.tamano.ancho).abs() > 0.5 || (t.alto - c.tamano.alto).abs() > 0.5 {
+                return Err(error(format!(
+                    "la página {} ({t}) no mide lo que la carátula: {} × {} mm",
+                    i + 1,
+                    pdf::mm_es(c.tamano.ancho),
+                    pdf::mm_es(c.tamano.alto)
+                )));
+            }
+            portada::cara_completa(c, i, &op)
+        } else {
+            let lista: Vec<(TipoPanel, usize, Tamano)> =
+                asignar.iter().filter_map(|(t, i)| i.map(|i| tam(i).map(|s| (*t, i, s)))).collect::<R<_>>()?;
+            if lista.is_empty() {
+                return Ok(None);
+            }
+            portada::cara_armada(c, &lista, &op).map_err(error)?
+        };
+        cara.nombre = nombre.into();
+        Ok(Some(cara))
+    };
+    let tiro = armar(
+        &exterior,
+        pg.exterior,
+        &[
+            (TipoPanel::Tapa, pg.portada),
+            (TipoPanel::Contratapa, pg.contraportada),
+            (TipoPanel::Lomo, pg.lomo),
+            (TipoPanel::SolapaTapa, pg.solapa_portada),
+            (TipoPanel::SolapaContratapa, pg.solapa_contraportada),
+        ],
+        "Carátula tiro (exterior)",
+    )?
+    .ok_or_else(|| error("marque al menos la portada o el exterior completo de la carátula"))?;
+    let mut avisos = Vec::new();
+    let tapa_dura = matches!(pp.tipo, TipoPortada::TapaDura { .. });
+    let retiro = if tapa_dura {
+        if pg.segunda.is_some() || pg.tercera.is_some() || pg.interior.is_some() {
+            avisos.push("en tapa dura el interior del forro queda bajo las guardas: el retiro no se imprime".into());
+        }
+        None
+    } else {
+        armar(
+            &interior_dims,
+            pg.interior,
+            &[
+                (TipoPanel::Tapa, pg.segunda),
+                (TipoPanel::Contratapa, pg.tercera),
+                (TipoPanel::SolapaTapa, pg.solapa_portada_interior),
+                (TipoPanel::SolapaContratapa, pg.solapa_contraportada_interior),
+            ],
+            "Carátula retiro (interior)",
+        )?
+    };
+    let con_retiro = retiro.is_some();
+    if con_retiro && exterior.lomo > 0.0 {
+        avisos.push("deje sin imprimir la zona de encolado del lomo en el interior si el pegante lo requiere".into());
+    }
+    let caras: Vec<Cara> = std::iter::once(tiro).chain(retiro).collect();
+    let perfil = pp.maquina.as_ref().map(|m| m.salida.clone()).unwrap_or_default();
+    let opciones = salida(&perfil, icc, &pp.titulo, pp.fecha, &pp.correcciones);
+
+    if !(p.montar && pp.maquina.is_some()) {
+        let (bytes, mas, pdfx) = escribir(fuente, &caras, &opciones)?;
+        avisos.extend(mas);
+        let informe = InformeCaratula { portada: &exterior, con_retiro, por_pliego: None, pliego: None, avisos, pdfx };
+        return Ok(Resultado { pdf: bytes, informe: serde_json::to_string(&informe).map_err(error)? });
+    }
+
+    // Montaje en el pliego: primero la carátula sola (con sus cajas) y luego
+    // se repite en el pliego con su tiro y retiro.
+    let maquina = pp.maquina.as_ref().expect("comprobado arriba");
+    let sin_correcciones = OpcionesSalida { correcciones: Correcciones::ninguna(), icc: None, ..opciones.clone() };
+    let (mut doc, _) = pdf::componer(fuente, &caras, &sin_correcciones).map_err(error)?;
+    let mut intermedio = Vec::new();
+    doc.save_to(&mut intermedio).map_err(error)?;
+    let fuente = Fuente::desde_bytes(&intermedio).map_err(error)?;
+    let volteo = Volteo::Lateral;
+    let mut margenes = Margenes::de_maquina(maquina);
+    if con_retiro && !maquina.duplex {
+        margenes = margenes.para_volteo(volteo);
+    }
+    let parametros = ParametrosNup {
+        pliego: maquina.pliego_max,
+        margenes,
+        pieza: exterior.tamano,
+        rebase: pp.rebase,
+        calle: 0.0,
+        orientacion: Orientacion::Auto,
+        marcas: marcas(pp.marcas, true),
+    };
+    let d =
+        nup::calcular(&parametros).map_err(|e| error(format!("la carátula no cabe en «{}»: {e}", maquina.nombre)))?;
+    let mut caras_pliego =
+        nup::caras_trabajo(&parametros, &d, if con_retiro { 2 } else { 1 }, con_retiro.then_some(volteo));
+    for (c, nombre) in caras_pliego.iter_mut().zip(["Carátulas tiro", "Carátulas retiro"]) {
+        c.nombre = nombre.into();
+    }
+    let (bytes, mas, pdfx) = escribir(fuente, &caras_pliego, &opciones)?;
+    avisos.extend(mas);
+    let informe = InformeCaratula {
+        portada: &exterior,
+        con_retiro,
+        por_pliego: Some(d.piezas()),
+        pliego: Some(parametros.pliego),
+        avisos,
+        pdfx,
+    };
+    Ok(Resultado { pdf: bytes, informe: serde_json::to_string(&informe).map_err(error)? })
 }
 
 /// Lomo de un libro al lomo (para el asistente rápido).

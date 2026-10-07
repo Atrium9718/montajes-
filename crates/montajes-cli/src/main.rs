@@ -347,6 +347,9 @@ struct ArgsLibro {
     /// Firmas por pliego: auto (tira y retira si caben dos), una, repetir o tira-retira.
     #[arg(long, value_enum, default_value = "auto")]
     aprovechamiento: AprovechamientoArg,
+    /// Cuadernillos a mano, separados por comas (p. ej. 16,16,8).
+    #[arg(long, value_delimiter = ',')]
+    cuadernillos: Vec<u32>,
     #[command(flatten)]
     correccion: ArgsCorreccion,
     /// Solo calcular y mostrar el plan, sin escribir el PDF.
@@ -804,6 +807,8 @@ fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
             AprovechamientoArg::Repetir => Aprovechamiento::Repetir,
             AprovechamientoArg::TiraRetira => Aprovechamiento::TiraRetira,
         },
+        cuadernillos: a.cuadernillos.clone(),
+        mapa: vec![],
         marcas: opciones_marcas(a.sin_marcas, a.sin_tira_color),
     };
     let plan = firmas::planificar(&parametros)?;

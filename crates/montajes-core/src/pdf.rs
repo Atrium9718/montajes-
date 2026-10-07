@@ -148,6 +148,42 @@ impl Fuente {
         &self.doc
     }
 
+    /// Como [`Fuente::formato_comun`], pero solo con las páginas indicadas
+    /// (p. ej. la tripa, cuando el PDF también trae la carátula).
+    pub fn formato_de(
+        &self,
+        indices: &[usize],
+        formato: Option<Tamano>,
+        rebase: f64,
+    ) -> Resultado<(Tamano, Vec<String>)> {
+        let primera = indices.first().ok_or_else(|| Error::Invalido("no hay páginas seleccionadas".into()))?;
+        let pagina =
+            |i: usize| self.paginas.get(i).ok_or_else(|| Error::Invalido(format!("el PDF no tiene página {}", i + 1)));
+        let formato = match formato {
+            Some(f) => f,
+            None => pagina(*primera)?.tamano_corte(),
+        };
+        let mut avisos = Vec::new();
+        for &i in indices {
+            let p = pagina(i)?;
+            let t = p.tamano_corte();
+            if (t.ancho - formato.ancho).abs() > 0.5 || (t.alto - formato.alto).abs() > 0.5 {
+                return Err(Error::Invalido(format!(
+                    "la página {} mide {t} y el formato es {formato} (¿es de la carátula?)",
+                    i + 1
+                )));
+            }
+            if p.rebase_disponible() + 0.05 < rebase {
+                avisos.push(format!(
+                    "página {}: tiene {:.1} mm de rebase y se pidieron {rebase} mm",
+                    i + 1,
+                    p.rebase_disponible()
+                ));
+            }
+        }
+        Ok((formato, avisos))
+    }
+
     /// Formato común de todas las páginas (o el pedido) y avisos de rebase.
     /// Falla si alguna página mide distinto.
     pub fn formato_comun(&self, formato: Option<Tamano>, rebase: f64) -> Resultado<(Tamano, Vec<String>)> {

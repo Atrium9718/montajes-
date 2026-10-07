@@ -158,6 +158,28 @@ export function cotizar(peticion) {
 }
 
 /**
+ * Carátula con su tiro (exterior) y retiro (interior). El interior se arma
+ * reflejado: visto desde adentro, la segunda de forros queda a la izquierda.
+ * @param {Uint8Array} pdf
+ * @param {string} peticion
+ * @param {Uint8Array} icc
+ * @returns {Resultado}
+ */
+export function generar_caratula(pdf, peticion, icc) {
+    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(peticion, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(icc, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.generar_caratula(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Resultado.__wrap(ret[0]);
+}
+
+/**
  * @param {Uint8Array} pdf
  * @param {string} peticion
  * @param {Uint8Array} icc

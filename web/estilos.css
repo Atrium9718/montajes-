@@ -331,3 +331,15 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; margin-t
 .cotizacion-total span { display: block; font-size: 13px; color: #9c9c97; }
 .cotizacion-total b { font-size: clamp(26px, 4vw, 40px); letter-spacing: -0.03em; }
 .aviso-suave { font-size: 14px; padding: 10px 14px; border-radius: 12px; background: color-mix(in srgb, var(--naranja) 12%, var(--superficie)); }
+
+/* Páginas del libro: qué es cada página */
+.grilla-paginas { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; max-height: 520px; overflow: auto; padding: 2px; }
+.pagina-rol { display: grid; gap: 6px; padding: 6px; border-radius: 14px; background: var(--superficie-2); border: 2px solid transparent; }
+.pagina-rol.rol-caratula { border-color: var(--naranja); background: color-mix(in srgb, var(--naranja) 10%, var(--superficie)); }
+.pagina-rol.rol-excluir { opacity: .5; }
+.pagina-mini { position: relative; display: grid; place-items: center; aspect-ratio: 3 / 4; background: var(--superficie); border-radius: 8px; overflow: hidden; }
+.pagina-mini img { width: 100%; height: 100%; object-fit: contain; }
+.pagina-mini b { position: absolute; left: 4px; bottom: 4px; font-size: 11px; background: var(--oscuro); color: #fff; border-radius: 999px; padding: 1px 7px; }
+.pagina-rol select { font-size: 12px; padding: 6px; border-radius: 8px; }
+.caratula { display: grid; gap: 14px; }
+.explicacion-clara { font-size: 15px; line-height: 1.5; }

@@ -73,6 +73,13 @@ pub struct ParametrosLibro {
     pub marcas: OpcionesMarcas,
     #[serde(default)]
     pub aprovechamiento: Aprovechamiento,
+    /// Cuadernillos elegidos a mano (p. ej. 16, 16, 8); vacío = automático.
+    #[serde(default)]
+    pub cuadernillos: Vec<u32>,
+    /// Página del PDF (desde 0) para cada página del libro, cuando la tripa
+    /// no es el PDF entero (p. ej. trae la carátula). Vacío = en orden.
+    #[serde(default)]
+    pub mapa: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,11 +252,27 @@ pub fn planificar(p: &ParametrosLibro) -> Resultado<PlanLibro> {
     if p.paginas == 0 {
         return Err(Error::Invalido("el libro no tiene páginas".into()));
     }
-    let paginas_libro = p.paginas.div_ceil(4) * 4;
+    if !p.mapa.is_empty() && p.mapa.len() != p.paginas as usize {
+        return Err(Error::Invalido("el mapa de páginas no coincide con las páginas de la tripa".into()));
+    }
+    let manual: u32 = p.cuadernillos.iter().sum();
+    if !p.cuadernillos.is_empty() {
+        if let Some(n) = p.cuadernillos.iter().find(|n| !TAMANOS_FIRMA.contains(n)) {
+            return Err(Error::Invalido(format!("cuadernillo de {n} páginas: use 4, 8, 16, 32 o 64")));
+        }
+        if manual < p.paginas {
+            return Err(Error::Invalido(format!(
+                "los cuadernillos suman {manual} páginas y la tripa tiene {}; faltan {}",
+                p.paginas,
+                p.paginas - manual
+            )));
+        }
+    }
+    let paginas_libro = if p.cuadernillos.is_empty() { p.paginas.div_ceil(4) * 4 } else { manual };
     let blancas = paginas_libro - p.paginas;
     let mut avisos = Vec::new();
     if blancas > 0 {
-        avisos.push(format!("se agregan {blancas} páginas en blanco al final para completar múltiplo de 4"));
+        avisos.push(format!("se agregan {blancas} páginas en blanco al final para completar los cuadernillos"));
     }
 
     let mut esquemas = Vec::new();
@@ -271,7 +294,7 @@ pub fn planificar(p: &ParametrosLibro) -> Resultado<PlanLibro> {
                 Error::NoCabe(format!("ni una firma de 4 páginas de {} cabe en {}", p.pagina, p.pliego))
             })?,
         };
-    let tamanos = repartir(paginas_libro, mayor);
+    let tamanos = if p.cuadernillos.is_empty() { repartir(paginas_libro, mayor) } else { p.cuadernillos.clone() };
     let numeracion = numerar(&tamanos, paginas_libro, p.encuadernacion.anidada());
 
     let creep = |pagina: u32| -> f64 {
@@ -385,7 +408,7 @@ fn caras_firma(
                 let mut corrido = corte;
                 corrido.x += if lomo_a_la_izquierda { -desplazamiento } else { desplazamiento };
                 Ubicacion {
-                    pagina: pagina as usize - 1,
+                    pagina: p.mapa.get(pagina as usize - 1).copied().unwrap_or(pagina as usize - 1),
                     corte: corrido,
                     giro: if pos.invertida { 180 } else { 0 },
                     recorte: corrido.expandir(p.rebase, p.rebase, p.rebase, p.rebase).interseccion(&celda),
@@ -501,6 +524,8 @@ mod pruebas {
             derecha_a_izquierda: false,
             marcas: OpcionesMarcas::default(),
             aprovechamiento: Aprovechamiento::Una,
+            cuadernillos: vec![],
+            mapa: vec![],
         }
     }
 
@@ -617,6 +642,26 @@ mod pruebas {
         assert_eq!(plan.caras.len(), 4);
         assert!(plan.caras.iter().all(|c| c.ubicaciones.len() == 8));
         assert_eq!(plan.juegos_planchas, 4);
+    }
+
+    #[test]
+    fn cuadernillos_a_mano_y_mapa_de_paginas() {
+        // PDF de 44 páginas: 1–2 y 43–44 son la carátula; la tripa es 3–42 (40 páginas).
+        let mut p = libro(40, Encuadernacion::Lomo);
+        p.cuadernillos = vec![16, 16, 8];
+        p.mapa = (2..42).collect();
+        let plan = planificar(&p).unwrap();
+        assert_eq!(plan.firmas.iter().map(|f| f.paginas).collect::<Vec<_>>(), [16, 16, 8]);
+        let mut usadas: Vec<usize> = plan.caras.iter().flat_map(|c| c.ubicaciones.iter().map(|u| u.pagina)).collect();
+        usadas.sort_unstable();
+        assert_eq!(usadas, (2..42).collect::<Vec<_>>());
+        // Si los cuadernillos no alcanzan, error claro; si sobran, páginas en blanco.
+        p.cuadernillos = vec![16, 16];
+        assert!(planificar(&p).is_err());
+        p.cuadernillos = vec![16, 16, 16];
+        assert_eq!(planificar(&p).unwrap().blancas, 8);
+        p.cuadernillos = vec![16, 12, 12];
+        assert!(planificar(&p).is_err());
     }
 
     #[test]
