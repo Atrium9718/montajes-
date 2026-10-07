@@ -29,7 +29,10 @@ montajes preflight tarjetas.pdf --cobertura 320
 montajes nup tarjetas.pdf -s pliego.pdf -m xerox --dorso --corregir --rebase-espejo
 montajes nup volante.pdf -s planta.pdf -m sm74 --pliego 500x350 --calle 4 --dorso --volteo cabeza
 
-# 4. Libros y revistas
+# Varios diseños o clientes en un mismo pliego (combinado)
+montajes combinar cliente-a.pdf cliente-b.pdf -s combinado.pdf -m xerox --cantidades 1000,500,250
+
+# 4. Libros y revistas (por defecto, tira y retira cuando la firma cabe dos veces)
 montajes libro revista.pdf -s revista-pliegos.pdf -m sm74 -e caballete --papel brillante115
 montajes libro novela.pdf -s novela-pliegos.pdf -m sm74 -e lomo --papel bond75 --fresado 3
 montajes libro manga.pdf -s manga-pliegos.pdf -m sm74 -e cosido --derecha-a-izquierda --firma 16

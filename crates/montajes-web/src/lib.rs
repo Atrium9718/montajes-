@@ -6,9 +6,9 @@
 use montajes_core::catalogo::{Maquina, PerfilSalida, VersionPdfx, papeles_de_referencia};
 use montajes_core::correcciones::Correcciones;
 use montajes_core::geometria::Tamano;
-use montajes_core::imposicion::firmas::{self, Encuadernacion, ParametrosLibro, PlanLibro};
+use montajes_core::imposicion::firmas::{self, Aprovechamiento, Encuadernacion, ParametrosLibro, PlanLibro};
 use montajes_core::imposicion::marcas::OpcionesMarcas;
-use montajes_core::imposicion::nup::{self, Distribucion, Orientacion, ParametrosNup};
+use montajes_core::imposicion::nup::{self, Diseno, Distribucion, Orientacion, ParametrosNup, PlanCombinado};
 use montajes_core::imposicion::{Cara, Margenes, Volteo};
 use montajes_core::pdf::{self, Fuente, OpcionesSalida};
 use montajes_core::portada::{self, ParametrosPortada, Portada, TipoPanel, TipoPortada};
@@ -175,7 +175,7 @@ pub fn revisar_pdf(pdf: &[u8], peticion: &str) -> R<String> {
 
 // ───────────────────────── Piezas sueltas ─────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct PeticionNup {
     maquina: Maquina,
     formato: Tamano,
@@ -273,6 +273,74 @@ pub fn generar_nup(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
     Ok(Resultado { pdf: bytes, informe })
 }
 
+// ───────────────────────── Combinado (varios diseños) ─────────────────────────
+
+/// Junta varios PDF en uno (en orden) y devuelve sus bytes.
+#[wasm_bindgen]
+pub fn unir_pdfs(archivos: js_sys::Array) -> R<Vec<u8>> {
+    let contenidos: Vec<Vec<u8>> = archivos.iter().map(|a| js_sys::Uint8Array::new(&a).to_vec()).collect();
+    let docs = contenidos.iter().map(|b| lopdf::Document::load_mem(b)).collect::<Result<Vec<_>, _>>().map_err(error)?;
+    let mut doc = pdf::unir_documentos(docs).map_err(error)?;
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).map_err(error)?;
+    Ok(bytes)
+}
+
+#[derive(Deserialize)]
+struct PeticionCombinado {
+    #[serde(flatten)]
+    nup: PeticionNup,
+    disenos: Vec<Diseno>,
+}
+
+#[derive(Serialize)]
+struct InformeCombinado<'a> {
+    plan: &'a PlanCombinado,
+    distribucion: &'a Distribucion,
+    pliego: Tamano,
+    avisos: Vec<String>,
+    pdfx: bool,
+}
+
+fn plan_combinado(p: &PeticionCombinado) -> R<(ParametrosNup, Distribucion, PlanCombinado)> {
+    let mut nup_p = PeticionNup { dorso: false, ..p.nup.clone() };
+    nup_p.paginas = 1;
+    let (mut parametros, d, _) = plan_nup(&nup_p)?;
+    let con_dorso = p.disenos.iter().any(|x| x.dorso.is_some());
+    if con_dorso && !p.nup.maquina.duplex {
+        parametros.margenes = Margenes::de_maquina(&p.nup.maquina).para_volteo(p.nup.volteo);
+    }
+    let d = if con_dorso { nup::calcular(&parametros).map_err(error)? } else { d };
+    let plan = nup::combinar(&parametros, &d, &p.disenos, p.nup.volteo).map_err(error)?;
+    Ok((parametros, d, plan))
+}
+
+#[wasm_bindgen]
+pub fn planear_combinado(peticion: &str) -> R<String> {
+    let p: PeticionCombinado = serde_json::from_str(peticion).map_err(error)?;
+    let (par, d, plan) = plan_combinado(&p)?;
+    let avisos = plan.caras.iter().flat_map(|c| c.marcas.avisos.clone()).collect();
+    serde_json::to_string(&InformeCombinado { plan: &plan, distribucion: &d, pliego: par.pliego, avisos, pdfx: false })
+        .map_err(error)
+}
+
+#[wasm_bindgen]
+pub fn generar_combinado(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    let mut p: PeticionCombinado = serde_json::from_str(peticion).map_err(error)?;
+    let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
+    let (formato, mut avisos) = fuente.formato_comun(Some(p.nup.formato), p.nup.rebase).map_err(error)?;
+    p.nup.formato = formato;
+    let (par, d, plan) = plan_combinado(&p)?;
+    let s = &p.nup.maquina.salida;
+    let (bytes, mas, pdfx) =
+        escribir(fuente, &plan.caras, &salida(s, icc, &p.nup.titulo, p.nup.fecha, &p.nup.correcciones))?;
+    avisos.extend(mas);
+    let informe =
+        serde_json::to_string(&InformeCombinado { plan: &plan, distribucion: &d, pliego: par.pliego, avisos, pdfx })
+            .map_err(error)?;
+    Ok(Resultado { pdf: bytes, informe })
+}
+
 // ───────────────────────── Libros y revistas ─────────────────────────
 
 #[derive(Deserialize)]
@@ -306,6 +374,8 @@ struct PeticionLibro {
     fecha: u64,
     #[serde(default)]
     correcciones: Correcciones,
+    #[serde(default)]
+    aprovechamiento: Aprovechamiento,
 }
 
 #[derive(Serialize)]
@@ -332,6 +402,7 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
         calibre_mm: p.calibre_um.map(|c| c / 1000.0),
         derecha_a_izquierda: p.derecha_a_izquierda,
         marcas: marcas(p.marcas, p.tira_color),
+        aprovechamiento: p.aprovechamiento,
     };
     let plan = firmas::planificar(&parametros).map_err(error)?;
     let lomo = p.calibre_um.map(|c| f64::from(plan.paginas_libro / 2) * c / 1000.0);

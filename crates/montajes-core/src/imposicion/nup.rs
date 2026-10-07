@@ -128,12 +128,21 @@ fn recorte(corte: Rect, bloque: Rect, rebase: f64, calle: f64) -> Rect {
 
 /// Arma la cara de tiro con la página `pagina` repetida en todas las posiciones.
 pub fn cara_tiro(p: &ParametrosNup, d: &Distribucion, pagina: usize) -> Cara {
+    cara_tiro_posiciones(p, d, &vec![Some(pagina); d.cortes.len()])
+}
+
+/// Tiro con una página distinta (o ninguna) en cada posición, en el orden de
+/// `d.cortes`.
+pub fn cara_tiro_posiciones(p: &ParametrosNup, d: &Distribucion, paginas: &[Option<usize>]) -> Cara {
     let bloque = bloque(&d.cortes);
     let giro = if d.girada { 90 } else { 0 };
     let ubicaciones = d
         .cortes
         .iter()
-        .map(|&corte| Ubicacion { pagina, corte, giro, recorte: recorte(corte, bloque, p.rebase, p.calle) })
+        .zip(paginas)
+        .filter_map(|(&corte, pagina)| {
+            pagina.map(|pagina| Ubicacion { pagina, corte, giro, recorte: recorte(corte, bloque, p.rebase, p.calle) })
+        })
         .collect();
     Cara {
         nombre: "Tiro".into(),
@@ -147,26 +156,36 @@ pub fn cara_tiro(p: &ParametrosNup, d: &Distribucion, pagina: usize) -> Cara {
 /// Arma el retiro: cada pieza queda exactamente detrás de su frente una vez
 /// volteado el pliego.
 pub fn cara_retiro(p: &ParametrosNup, d: &Distribucion, pagina: usize, volteo: Volteo) -> Cara {
+    cara_retiro_posiciones(p, d, &vec![Some(pagina); d.cortes.len()], volteo)
+}
+
+/// Retiro con la página de dorso de cada posición del tiro.
+pub fn cara_retiro_posiciones(p: &ParametrosNup, d: &Distribucion, paginas: &[Option<usize>], volteo: Volteo) -> Cara {
     let (w, h) = (p.pliego.ancho, p.pliego.alto);
     let espejo = |r: Rect| match volteo {
         Volteo::Lateral => Rect::new(w - r.derecha(), r.y, r.ancho, r.alto),
         Volteo::Cabeza => Rect::new(r.x, h - r.arriba(), r.ancho, r.alto),
     };
-    let tiro = cara_tiro(p, d, pagina);
-    let ubicaciones = tiro
-        .ubicaciones
-        .into_iter()
-        .map(|u| Ubicacion {
-            pagina,
-            corte: espejo(u.corte),
-            recorte: espejo(u.recorte),
-            giro: match volteo {
-                Volteo::Lateral => u.giro,
-                Volteo::Cabeza => (u.giro + 180) % 360,
-            },
+    let bloque = bloque(&d.cortes);
+    let giro = if d.girada { 90 } else { 0 };
+    let ubicaciones = d
+        .cortes
+        .iter()
+        .zip(paginas)
+        .filter_map(|(&corte, pagina)| {
+            let pagina = (*pagina)?;
+            Some(Ubicacion {
+                pagina,
+                corte: espejo(corte),
+                recorte: espejo(recorte(corte, bloque, p.rebase, p.calle)),
+                giro: match volteo {
+                    Volteo::Lateral => giro,
+                    Volteo::Cabeza => (giro + 180) % 360,
+                },
+            })
         })
         .collect::<Vec<_>>();
-    let cortes: Vec<Rect> = ubicaciones.iter().map(|u| u.corte).collect();
+    let cortes: Vec<Rect> = d.cortes.iter().map(|&c| espejo(c)).collect();
     let area = p.margenes.area_imprimible(p.pliego);
     Cara {
         nombre: "Retiro".into(),
@@ -175,6 +194,92 @@ pub fn cara_retiro(p: &ParametrosNup, d: &Distribucion, pagina: usize, volteo: V
         cajas: None,
         ubicaciones,
     }
+}
+
+/// Un diseño de un trabajo combinado.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Diseno {
+    /// Página del frente (desde 0).
+    pub frente: usize,
+    /// Página del dorso, si lleva.
+    #[serde(default)]
+    pub dorso: Option<usize>,
+    /// Ejemplares que se necesitan.
+    pub cantidad: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanCombinado {
+    /// Posiciones del pliego asignadas a cada diseño.
+    pub posiciones: Vec<u32>,
+    /// Pliegos que hay que imprimir para cubrir todas las cantidades.
+    pub pliegos: u32,
+    /// Ejemplares que salen de cada diseño (posiciones × pliegos).
+    pub impresos: Vec<u32>,
+    pub caras: Vec<Cara>,
+}
+
+/// Reparte las posiciones del pliego entre diseños distintos para imprimir
+/// todas las cantidades con el menor número de pliegos (gang run).
+///
+/// Con `p` posiciones y `S` pliegos, cada diseño necesita `⌈cantidad / S⌉`
+/// posiciones; se busca el menor `S` cuya suma quepa, y las posiciones que
+/// sobran van a los diseños con más ejemplares por posición.
+pub fn combinar(p: &ParametrosNup, d: &Distribucion, disenos: &[Diseno], volteo: Volteo) -> Resultado<PlanCombinado> {
+    let posiciones = d.cortes.len() as u32;
+    if disenos.is_empty() {
+        return Err(Error::Invalido("no hay diseños para combinar".into()));
+    }
+    if disenos.len() as u32 > posiciones {
+        return Err(Error::NoCabe(format!(
+            "caben {posiciones} piezas por pliego y hay {} diseños; use un pliego mayor o divida el trabajo",
+            disenos.len()
+        )));
+    }
+    if disenos.iter().any(|x| x.cantidad == 0) {
+        return Err(Error::Invalido("cada diseño necesita una cantidad mayor que cero".into()));
+    }
+    let total: u64 = disenos.iter().map(|x| u64::from(x.cantidad)).sum();
+    let mayor = disenos.iter().map(|x| x.cantidad).max().unwrap_or(1);
+    let mut pliegos = (total.div_ceil(u64::from(posiciones)) as u32).max(1);
+    let asignar = |s: u32| disenos.iter().map(|x| x.cantidad.div_ceil(s)).collect::<Vec<u32>>();
+    while pliegos < mayor && asignar(pliegos).iter().sum::<u32>() > posiciones {
+        pliegos += 1;
+    }
+    let mut k = asignar(pliegos);
+    // Las posiciones libres van a quien más ejemplares tiene por posición.
+    while k.iter().sum::<u32>() < posiciones {
+        let i = (0..k.len())
+            .max_by(|&a, &b| {
+                let ca = f64::from(disenos[a].cantidad) / f64::from(k[a]);
+                let cb = f64::from(disenos[b].cantidad) / f64::from(k[b]);
+                ca.total_cmp(&cb)
+            })
+            .expect("hay diseños");
+        k[i] += 1;
+    }
+    // Cada diseño ocupa posiciones seguidas: se corta y se separa más fácil.
+    let mut frente = Vec::with_capacity(posiciones as usize);
+    let mut dorso = Vec::with_capacity(posiciones as usize);
+    for (x, &n) in disenos.iter().zip(&k) {
+        for _ in 0..n {
+            frente.push(Some(x.frente));
+            dorso.push(x.dorso);
+        }
+    }
+    let mut tiro = cara_tiro_posiciones(p, d, &frente);
+    let mut caras = Vec::new();
+    if dorso.iter().any(Option::is_some) {
+        tiro.nombre = "Combinado tiro".into();
+        let mut retiro = cara_retiro_posiciones(p, d, &dorso, volteo);
+        retiro.nombre = "Combinado retiro".into();
+        caras.extend([tiro, retiro]);
+    } else {
+        tiro.nombre = "Combinado".into();
+        caras.push(tiro);
+    }
+    let impresos = k.iter().map(|n| n * pliegos).collect();
+    Ok(PlanCombinado { posiciones: k, pliegos, impresos, caras })
 }
 
 /// Todas las caras de un trabajo: un pliego por página o, con `dorso`, un
@@ -280,6 +385,38 @@ mod pruebas {
         }
         let cabeza = cara_retiro(&p, &d, 1, Volteo::Cabeza);
         assert!(cabeza.ubicaciones.iter().all(|u| u.giro == 180));
+    }
+
+    #[test]
+    fn combinado_minimiza_pliegos() {
+        let p = tarjetas(0.0, Orientacion::Auto);
+        let d = calcular(&p).unwrap(); // 27 posiciones
+        let disenos = [
+            Diseno { frente: 0, dorso: None, cantidad: 1000 },
+            Diseno { frente: 1, dorso: None, cantidad: 500 },
+            Diseno { frente: 2, dorso: None, cantidad: 250 },
+        ];
+        let plan = combinar(&p, &d, &disenos, Volteo::Lateral).unwrap();
+        // 1750 tarjetas / 27 posiciones ≥ 65 pliegos; con 65: 16 + 8 + 4 = 28 > 27; con 67: 15 + 8 + 4 = 27.
+        assert_eq!(plan.pliegos, 67);
+        assert_eq!(plan.posiciones.iter().sum::<u32>(), 27);
+        assert!(plan.impresos.iter().zip(&disenos).all(|(i, x)| *i >= x.cantidad));
+        assert_eq!(plan.caras.len(), 1);
+        assert_eq!(plan.caras[0].ubicaciones.len(), 27);
+    }
+
+    #[test]
+    fn combinado_con_dorso_y_limites() {
+        let p = tarjetas(0.0, Orientacion::Auto);
+        let d = calcular(&p).unwrap();
+        let disenos =
+            [Diseno { frente: 0, dorso: Some(1), cantidad: 100 }, Diseno { frente: 2, dorso: None, cantidad: 100 }];
+        let plan = combinar(&p, &d, &disenos, Volteo::Lateral).unwrap();
+        assert_eq!(plan.caras.len(), 2);
+        // Solo el primer diseño lleva dorso.
+        assert_eq!(plan.caras[1].ubicaciones.len() as u32, plan.posiciones[0]);
+        let muchos: Vec<Diseno> = (0..30).map(|i| Diseno { frente: i, dorso: None, cantidad: 10 }).collect();
+        assert!(matches!(combinar(&p, &d, &muchos, Volteo::Lateral), Err(Error::NoCabe(_))));
     }
 
     #[test]

@@ -40,8 +40,8 @@ const estado = {
   maquinas: almacen.leer("maquinas", []),
   papeles: almacen.leer("papeles", []),
   preferencias: almacen.leer("preferencias", {}),
-  piezas: { archivo: null, info: null, plan: null, error: null, cara: 0, op: { rebase: 3, calle: 0, orientacion: "auto", dorso: false, volteo: "lateral", marcas: true, tira: true } },
-  libro: { archivo: null, info: null, plan: null, error: null, cara: 0, op: { encuadernacion: "lomo", firma: "auto", rebase: 3, fresado: 3, refile: 3, rtl: false, marcas: true, tira: true, creep: true } },
+  piezas: { archivo: null, archivos: [], info: null, plan: null, error: null, cara: 0, op: { modo: "repetir", cantidades: [], rebase: 3, calle: 0, orientacion: "auto", dorso: false, volteo: "lateral", marcas: true, tira: true } },
+  libro: { archivo: null, info: null, plan: null, error: null, cara: 0, op: { encuadernacion: "lomo", firma: "auto", aprovechamiento: "auto", rebase: 3, fresado: 3, refile: 3, rtl: false, marcas: true, tira: true, creep: true } },
   portada: { archivo: null, info: null, calculo: null, error: null, op: { ancho: 148, alto: 210, paginas: 240, lomo: "", tipo: "rustica", solapa: 0, carton: 2.5, escuadra: 3, vuelta: 15, bisagra: 8, rebase: 3, rtl: false, orden: ["tapa", "contratapa", "lomo", "solapa_tapa", "solapa_contratapa"] } },
 };
 
@@ -177,19 +177,21 @@ function zonaArchivo(id, texto) {
     </label>`;
 }
 
-function conectarArchivo(id, alCargar) {
+function conectarArchivo(id, alCargar, varios = false) {
   const zona = $(`#${id}-zona`);
   const input = $(`#${id}`);
   if (!zona) return;
-  const leer = async (archivo) => {
-    if (!archivo) return;
-    const bytes = new Uint8Array(await archivo.arrayBuffer());
-    alCargar({ nombre: archivo.name, tamano: archivo.size, bytes });
+  if (varios) input.multiple = true;
+  const leer = async (lista) => {
+    const archivos = [...lista].filter((a) => /pdf$/i.test(a.type) || /\.pdf$/i.test(a.name));
+    if (!archivos.length) return;
+    const leidos = await Promise.all(archivos.map(async (a) => ({ nombre: a.name, tamano: a.size, bytes: new Uint8Array(await a.arrayBuffer()) })));
+    if (varios) alCargar(leidos); else alCargar(leidos[0]);
   };
-  input.addEventListener("change", () => leer(input.files[0]));
+  input.addEventListener("change", () => leer(input.files));
   zona.addEventListener("dragover", (e) => { e.preventDefault(); zona.classList.add("encima"); });
   zona.addEventListener("dragleave", () => zona.classList.remove("encima"));
-  zona.addEventListener("drop", (e) => { e.preventDefault(); zona.classList.remove("encima"); leer(e.dataTransfer.files[0]); });
+  zona.addEventListener("drop", (e) => { e.preventDefault(); zona.classList.remove("encima"); leer(e.dataTransfer.files); });
 }
 
 function tarjetaArchivo(archivo, info, idQuitar) {
@@ -427,14 +429,16 @@ function vistaPiezas(main) {
   const t = estado.piezas;
   const o = t.op;
   main.innerHTML = `
-    <div class="encabezado"><div><h1>Volantes y <span class="serif">tarjetas</span></h1><p>Repite la pieza en el pliego con el mejor aprovechamiento. Para varias páginas, cada una va en su propio pliego.</p></div></div>
+    <div class="encabezado"><div><h1>Volantes y <span class="serif">tarjetas</span></h1><p>Repite una pieza en el pliego con el mejor aprovechamiento, o combina varios diseños y clientes en el mismo pliego según la cantidad de cada uno.</p></div></div>
     <div class="trabajo">
       <div class="panel">
         <section class="tarjeta paso ${t.info ? "listo" : ""}">
           <div class="paso-titulo"><span class="paso-num">1</span><h3>Archivo</h3></div>
-          ${t.archivo ? tarjetaArchivo(t.archivo, t.info, "pz-cambiar") : zonaArchivo("pz-archivo", "Sube el PDF de la pieza")}
+          ${chips("modo", [["repetir", "Un diseño por pliego"], ["combinar", "Combinar varios"]], o.modo)}
+          ${o.modo === "combinar" ? bloqueArchivosCombinado(t) : t.archivo ? tarjetaArchivo(t.archivo, t.info, "pz-cambiar") : zonaArchivo("pz-archivo", "Sube el PDF de la pieza")}
           ${bloquePreflight(t)}
         </section>
+        ${o.modo === "combinar" && t.info?.formato ? bloqueCantidades(t) : ""}
         <section class="tarjeta paso">
           <div class="paso-titulo"><span class="paso-num">2</span><h3>Montaje</h3></div>
           ${selectorMaquina("pz-maquina")}
@@ -461,7 +465,17 @@ function vistaPiezas(main) {
       <div class="resultado" id="pz-resultado"></div>
     </div>`;
 
-  conectarArchivo("pz-archivo", (a) => { analizarArchivo(t, a); vistaPiezas(main); });
+  if (o.modo === "combinar") {
+    conectarArchivo("pz-archivo", (lista) => { agregarArchivosCombinado(t, lista); vistaPiezas(main); }, true);
+    $$("[data-quitar]", main).forEach((b) => b.addEventListener("click", () => { t.archivos.splice(Number(b.dataset.quitar), 1); agregarArchivosCombinado(t, []); vistaPiezas(main); }));
+    $$("[data-cantidad]", main).forEach((el) => el.addEventListener("change", (e) => {
+      e.stopPropagation();
+      o.cantidades[Number(el.dataset.cantidad)] = Math.max(1, Math.round(num(el.value, 1)));
+      calcularPiezas();
+    }));
+  } else {
+    conectarArchivo("pz-archivo", (a) => { analizarArchivo(t, a); vistaPiezas(main); });
+  }
   $("#pz-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaPiezas(main); });
   const leerOpciones = () => {
     o.rebase = num($("#pz-rebase").value, 3);
@@ -475,14 +489,68 @@ function vistaPiezas(main) {
   };
   conectarCorrecciones(main, () => vistaPiezas(main));
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file" || el.dataset.correccion) return;
+    if (el.type === "file" || el.dataset.correccion || el.dataset.cantidad) return;
     const antes = { dorso: o.dorso, rebase: o.rebase, maquina: estado.preferencias.maquina };
     leerOpciones();
     if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaPiezas(main); return; }
     if (antes.dorso !== o.dorso) vistaPiezas(main); else calcularPiezas();
   }));
-  conectarChips(main, (n, v) => { o[n] = v; calcularPiezas(); });
+  conectarChips(main, (n, v) => {
+    o[n] = v;
+    if (n === "modo") {
+      // Cada modo trabaja con sus propios archivos.
+      t.archivo = null; t.info = null; t.plan = null; t.error = null; t.preflight = null; t.archivos = [];
+      vistaPiezas(main);
+    } else calcularPiezas();
+  });
   calcularPiezas();
+}
+
+// ── Combinado: varios PDF (uno por cliente) y cantidades por diseño ──
+function bloqueArchivosCombinado(t) {
+  const lista = (t.archivos || []).map((a, i) => `<div class="archivo"><span class="orbe" aria-hidden="true"></span>
+    <div><b>${esc(a.nombre)}</b><span>${a.paginas ?? "?"} pág.</span></div>
+    <button class="boton boton-claro boton-chico" type="button" data-quitar="${i}" aria-label="Quitar ${esc(a.nombre)}">Quitar</button></div>`).join("");
+  return `${lista}${zonaArchivo("pz-archivo", t.archivos?.length ? "Agregar otro PDF" : "Sube los PDF de los diseños (uno o varios)")}`;
+}
+
+function agregarArchivosCombinado(t, nuevos) {
+  t.archivos = [...(t.archivos || []), ...nuevos];
+  for (const a of t.archivos) {
+    if (a.paginas == null) {
+      try { a.paginas = JSON.parse(motor.analizar(a.bytes)).paginas.length; } catch { a.paginas = 0; }
+    }
+  }
+  t.archivos = t.archivos.filter((a) => a.paginas > 0);
+  if (!t.archivos.length) { t.archivo = null; t.info = null; t.plan = null; return; }
+  try {
+    const bytes = t.archivos.length === 1 ? t.archivos[0].bytes : motor.unir_pdfs(t.archivos.map((a) => a.bytes));
+    analizarArchivo(t, { nombre: t.archivos.length === 1 ? t.archivos[0].nombre : `combinado-${t.archivos.length}-archivos.pdf`, bytes });
+  } catch (e) {
+    t.error = `No se pudieron juntar los PDF: ${e.message || e}`;
+  }
+}
+
+/** Diseños del combinado: cada página, o cada par frente/dorso. */
+function disenosCombinado(t) {
+  const etiquetas = [];
+  for (const a of t.archivos || []) for (let p = 1; p <= a.paginas; p++) etiquetas.push(`${a.nombre.replace(/\.pdf$/i, "")} · pág. ${p}`);
+  const paso = t.op.dorso ? 2 : 1;
+  const disenos = [];
+  for (let i = 0; i + paso - 1 < etiquetas.length; i += paso) {
+    const n = disenos.length;
+    disenos.push({ etiqueta: etiquetas[i] + (paso === 2 ? " + dorso" : ""), frente: i, dorso: paso === 2 ? i + 1 : null, cantidad: t.op.cantidades[n] ?? 1000 });
+  }
+  return disenos;
+}
+
+function bloqueCantidades(t) {
+  const disenos = disenosCombinado(t);
+  return `<section class="tarjeta paso">
+    <div class="paso-titulo"><span class="paso-num">✦</span><h3>Cantidades</h3></div>
+    <p class="tenue" style="font-size:14px">Ejemplares de cada diseño. El pliego se reparte para imprimirlos todos con el menor número de pliegos.</p>
+    <div class="cantidades">${disenos.map((x, i) => `<label class="cantidad"><span>${esc(x.etiqueta)}</span><input type="number" min="1" step="50" data-cantidad="${i}" value="${x.cantidad}"></label>`).join("")}</div>
+  </section>`;
 }
 
 function peticionPiezas(maquina, info, orientacion) {
@@ -496,6 +564,10 @@ function peticionPiezas(maquina, info, orientacion) {
   };
 }
 
+function peticionCombinado(maquina, info) {
+  return { ...peticionPiezas(maquina, info), disenos: disenosCombinado(estado.piezas).map(({ frente, dorso, cantidad }) => ({ frente, dorso, cantidad })) };
+}
+
 function calcularPiezas() {
   const t = estado.piezas;
   const caja = $("#pz-resultado");
@@ -503,7 +575,15 @@ function calcularPiezas() {
   const maquina = maquinaElegida("pz-maquina");
   t.plan = null;
   let explicacion = "";
-  if (t.info?.formato && maquina && !t.error) {
+  let errorPlan = "";
+  const combinado = t.op.modo === "combinar";
+  if (combinado && t.info?.formato && maquina && !t.error) {
+    try {
+      t.plan = JSON.parse(motor.planear_combinado(JSON.stringify(peticionCombinado(maquina, t.info))));
+      const disenos = disenosCombinado(t);
+      explicacion = disenos.map((x, i) => `${esc(x.etiqueta)}: <span class="resaltado">${t.plan.plan.posiciones[i]} posiciones</span> → ${t.plan.plan.impresos[i].toLocaleString("es-CO")} (sobran ${(t.plan.plan.impresos[i] - x.cantidad).toLocaleString("es-CO")})`).join("<br>");
+    } catch (e) { errorPlan = String(e.message || e); }
+  } else if (t.info?.formato && maquina && !t.error) {
     try {
       t.plan = JSON.parse(motor.planear_nup(JSON.stringify(peticionPiezas(maquina, t.info))));
       const d = t.plan.distribucion;
@@ -515,23 +595,28 @@ function calcularPiezas() {
       } else {
         explicacion = `Van <span class="resaltado">${d.columnas} columnas × ${d.filas} filas</span>${t.op.calle > 0 ? `, con ${mm(t.op.calle)} mm de calle` : ", con corte compartido"}.`;
       }
-    } catch (e) { t.error = String(e.message || e); }
+    } catch (e) { errorPlan = String(e.message || e); }
   }
   const d = t.plan?.distribucion;
+  const metricas = combinado && t.plan
+    ? `<div class="metrica"><b>${t.plan.plan.pliegos.toLocaleString("es-CO")}</b><span>pliegos a imprimir</span></div>
+        <div class="metrica"><b>${d.columnas * d.filas}</b><span>posiciones por pliego</span></div>
+        <div class="metrica"><b>${t.plan.plan.posiciones.length}</b><span>diseños combinados</span></div>`
+    : d ? `<div class="metrica"><b>${d.columnas * d.filas}</b><span>piezas por pliego</span></div>
+        <div class="metrica"><b>${mm(d.aprovechamiento, 0)}%</b><span>aprovechamiento</span></div>
+        <div class="metrica"><b>${t.plan.caras.length}</b><span>${t.plan.caras.length === 1 ? "pliego" : "pliegos"} en el PDF</span></div>` : "";
   const html = `
-    ${t.error ? `<div class="error-caja">${esc(t.error)}</div>` : ""}
+    ${t.error || errorPlan ? `<div class="error-caja">${esc(t.error || errorPlan)}</div>` : ""}
     ${d ? `<section class="tarjeta-oscura">
       <div class="metricas">
-        <div class="metrica"><b>${d.columnas * d.filas}</b><span>piezas por pliego</span></div>
-        <div class="metrica"><b>${mm(d.aprovechamiento, 0)}%</b><span>aprovechamiento</span></div>
-        <div class="metrica"><b>${t.plan.caras.length}</b><span>${t.plan.caras.length === 1 ? "pliego" : "pliegos"} en el PDF</span></div>
+        ${metricas}
       </div>
       <p class="explicacion" style="margin-top:20px">${explicacion}</p>
       <div class="acciones-resultado" style="margin-top:20px"><button class="boton boton-blanco" id="pz-generar" type="button">Descargar PDF listo para imprimir</button></div>
     </section>` : ""}
     ${listaAvisos(t.plan?.avisos)}
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver el pliego" : "Sube un PDF para ver el montaje")}`;
-  const carasPz = t.plan?.caras;
+  const carasPz = t.plan?.caras ?? t.plan?.plan?.caras;
   if (carasPz?.length) pedirMiniaturas(t, carasPz[Math.min(t.cara, carasPz.length - 1)].ubicaciones.map((u) => u.pagina), calcularPiezas);
   if (!pintar(caja, html)) return;
   conectarPaginador(caja, t, calcularPiezas);
@@ -541,8 +626,10 @@ function calcularPiezas() {
     await respirar();
     try {
       const icc = (await iccDB.leer(maquina.id)) || new Uint8Array();
-      const r = motor.generar_nup(t.archivo.bytes, JSON.stringify(peticionPiezas(maquina, t.info)), icc);
-      descargar(r.pdf, `${base(t.archivo.nombre)}-montaje.pdf`);
+      const r = combinado
+        ? motor.generar_combinado(t.archivo.bytes, JSON.stringify(peticionCombinado(maquina, t.info)), icc)
+        : motor.generar_nup(t.archivo.bytes, JSON.stringify(peticionPiezas(maquina, t.info)), icc);
+      descargar(r.pdf, `${base(t.archivo.nombre)}-${combinado ? "combinado" : "montaje"}.pdf`);
       const inf = JSON.parse(r.informe);
       const corregidos = inf.avisos.filter((a) => a.startsWith("corregido")).length;
       avisar(`${inf.pdfx ? "PDF listo (con perfil de salida)" : "PDF listo"}${corregidos ? ` · ${corregidos} correcciones aplicadas` : ""}`);
@@ -575,6 +662,7 @@ function vistaLibro(main) {
             ${papeles.length ? "" : `<small><a href="#catalogos">Agrega papeles</a> para calcular el lomo y el creep.</small>`}
           </label>
           <div class="campo"><span>Páginas por firma</span>${chips("firma", [["auto", "Auto"], ["4", "4"], ["8", "8"], ["16", "16"], ["32", "32"], ["64", "64"]], o.firma)}</div>
+          <div class="campo"><span>Firmas por pliego</span>${chips("aprovechamiento", [["auto", "Auto"], ["una", "Una"], ["repetir", "Repetir"], ["tira_retira", "Tira y retira"]], o.aprovechamiento)}<small>Auto monta en tira y retira (una sola plancha para las dos caras) cuando la firma cabe dos veces lado a lado.</small></div>
           <details class="avanzado"><summary>Márgenes, lectura y marcas</summary>
             <div class="paso">
               <div class="fila-3">
@@ -622,7 +710,7 @@ function peticionLibro(maquina, info) {
     maquina, formato: info.formato, paginas: info.paginas.length, encuadernacion: o.encuadernacion,
     firma: o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
-    derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira,
+    derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: o.aprovechamiento || "auto",
     titulo: base(estado.libro.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
   };
 }
@@ -653,6 +741,11 @@ function calcularLibro() {
     explicacion = `${p.paginas_libro} páginas en <span class="resaltado">${composicion}</span>${girada ? ", con la firma girada 90° para que quepa en el pliego" : ""}. `;
     explicacion += o.encuadernacion === "caballete" ? "Las firmas van anidadas una dentro de otra." : "Las firmas se alzan una tras otra" + (o.encuadernacion === "lomo" ? `, con ${mm(o.fresado)} mm de fresado en el lomo.` : ".");
     if (p.blancas) explicacion += ` Se agregan <b>${p.blancas}</b> páginas en blanco al final.`;
+    const multiples = p.firmas.filter((f) => f.copias > 1);
+    if (multiples.length) {
+      const tr = multiples.some((f) => f.tira_retira);
+      explicacion += ` ${multiples.length === p.firmas.length ? "Cada pliego" : `En ${multiples.length} firmas, cada pliego`} da <span class="resaltado">${Math.max(...multiples.map((f) => f.copias))} firmas${tr ? " en tira y retira" : ""}</span>: ${p.juegos_planchas} juegos de planchas y ${mm(p.pliegos_por_ejemplar, 2)} pliegos por ejemplar.`;
+    }
   }
   const tercera = !p ? "" : t.op.encuadernacion === "caballete"
     ? `<div class="metrica"><b>${mm(p.creep_max, 2)}</b><span>mm de creep (hoja central)</span></div>`

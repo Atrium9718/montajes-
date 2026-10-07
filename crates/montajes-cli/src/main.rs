@@ -10,7 +10,7 @@ use montajes_core::catalogo::{
 use montajes_core::correcciones::Correcciones;
 use montajes_core::geometria::Tamano;
 use montajes_core::imposicion::Cara;
-use montajes_core::imposicion::firmas::{self, Encuadernacion, ParametrosLibro};
+use montajes_core::imposicion::firmas::{self, Aprovechamiento, Encuadernacion, ParametrosLibro};
 use montajes_core::imposicion::marcas::OpcionesMarcas;
 use montajes_core::imposicion::nup::{self, Orientacion, ParametrosNup};
 use montajes_core::imposicion::{Margenes, Volteo};
@@ -49,6 +49,8 @@ enum Comando {
     Lomo(ArgsLomo),
     /// Montaje de piezas repetidas: volantes, tarjetas, etiquetas.
     Nup(ArgsNup),
+    /// Varios diseños (o clientes) en un mismo pliego según sus cantidades.
+    Combinar(ArgsCombinar),
     /// Libros y revistas por firmas: caballete, al lomo o cosido.
     Libro(ArgsLibro),
     /// Portada con lomo calculado: plantilla, armado y verificación.
@@ -262,6 +264,45 @@ enum EncuadernacionArg {
 }
 
 #[derive(Args)]
+struct ArgsCombinar {
+    /// PDF de los diseños: uno o varios (cada página es un diseño, o un par frente/dorso con --dorso).
+    #[arg(required = true)]
+    entradas: Vec<PathBuf>,
+    #[arg(short, long)]
+    salida: PathBuf,
+    #[arg(short, long)]
+    maquina: String,
+    /// Cantidad de cada diseño, en orden, separadas por comas (p. ej. 1000,500,250).
+    #[arg(long, value_delimiter = ',')]
+    cantidades: Vec<u32>,
+    #[arg(long, value_parser = parse_tamano)]
+    pliego: Option<Tamano>,
+    #[arg(long, value_parser = parse_tamano)]
+    formato: Option<Tamano>,
+    #[arg(long, default_value_t = 3.0)]
+    rebase: f64,
+    #[arg(long, default_value_t = 0.0)]
+    calle: f64,
+    /// Las páginas vienen en pares frente/dorso.
+    #[arg(long)]
+    dorso: bool,
+    #[arg(long, value_enum, default_value = "lateral")]
+    volteo: VolteoArg,
+    #[arg(long)]
+    sin_marcas: bool,
+    #[command(flatten)]
+    correccion: ArgsCorreccion,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum AprovechamientoArg {
+    Auto,
+    Una,
+    Repetir,
+    TiraRetira,
+}
+
+#[derive(Args)]
 struct ArgsLibro {
     /// PDF de la tripa (interior), página por página.
     entrada: PathBuf,
@@ -303,6 +344,9 @@ struct ArgsLibro {
     sin_marcas: bool,
     #[arg(long)]
     sin_tira_color: bool,
+    /// Firmas por pliego: auto (tira y retira si caben dos), una, repetir o tira-retira.
+    #[arg(long, value_enum, default_value = "auto")]
+    aprovechamiento: AprovechamientoArg,
     #[command(flatten)]
     correccion: ArgsCorreccion,
     /// Solo calcular y mostrar el plan, sin escribir el PDF.
@@ -470,6 +514,7 @@ fn ejecutar() -> Result<()> {
         Comando::Preflight(a) => preflight_cmd(a),
         Comando::Lomo(a) => lomo(&datos, a),
         Comando::Nup(a) => nup(&datos, a),
+        Comando::Combinar(a) => combinar_cmd(&datos, a),
         Comando::Libro(a) => libro_cmd(&datos, a),
         Comando::Portada(c) => portada_cmd(&datos, c),
     }
@@ -753,6 +798,12 @@ fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
         refile: a.refile,
         calibre_mm: if a.sin_creep { None } else { papel.as_ref().map(Papel::calibre_mm) },
         derecha_a_izquierda: a.derecha_a_izquierda,
+        aprovechamiento: match a.aprovechamiento {
+            AprovechamientoArg::Auto => Aprovechamiento::Auto,
+            AprovechamientoArg::Una => Aprovechamiento::Una,
+            AprovechamientoArg::Repetir => Aprovechamiento::Repetir,
+            AprovechamientoArg::TiraRetira => Aprovechamiento::TiraRetira,
+        },
         marcas: opciones_marcas(a.sin_marcas, a.sin_tira_color),
     };
     let plan = firmas::planificar(&parametros)?;
@@ -770,15 +821,27 @@ fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
             Encuadernacion::Cosido => "cosido (firmas alzadas)",
         }
     );
-    let mut resumen: Vec<(u32, bool, u32)> = Vec::new();
+    let mut resumen: Vec<(u32, bool, u32, bool, u32)> = Vec::new();
     for f in &plan.firmas {
         match resumen.last_mut() {
-            Some((n, g, cantidad)) if *n == f.paginas && *g == f.girada => *cantidad += 1,
-            _ => resumen.push((f.paginas, f.girada, 1)),
+            Some((n, g, c, tr, cantidad))
+                if *n == f.paginas && *g == f.girada && *c == f.copias && *tr == f.tira_retira =>
+            {
+                *cantidad += 1
+            }
+            _ => resumen.push((f.paginas, f.girada, f.copias, f.tira_retira, 1)),
         }
     }
-    for (n, girada, cantidad) in resumen {
-        println!("  {cantidad} × firma de {n} pp{}", if girada { " (girada 90°)" } else { "" });
+    for (n, girada, copias, tira_retira, cantidad) in resumen {
+        println!(
+            "  {cantidad} × firma de {n} pp{}{}",
+            if girada { " (girada 90°)" } else { "" },
+            match (copias, tira_retira) {
+                (1, _) => String::new(),
+                (c, true) => format!(", {c} por pliego en tira y retira (un juego de planchas)"),
+                (c, false) => format!(", {c} por pliego"),
+            }
+        );
     }
     for f in &plan.firmas {
         let (a, b) = (f.paginas_libro.iter().min().unwrap(), f.paginas_libro.iter().max().unwrap());
@@ -802,7 +865,12 @@ fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
         let c = libro::calcular_lomo(plan.paginas_libro, papel, None, 0.0)?;
         println!("Lomo del bloque: {:.1} mm (sin portada)", c.lomo_mm);
     }
-    println!("Pliegos en el PDF: {} ({} firmas × tiro y retiro)", plan.caras.len(), plan.firmas.len());
+    println!(
+        "Pliegos en el PDF: {} · juegos de planchas: {} · pliegos por ejemplar: {:.2}",
+        plan.caras.len(),
+        plan.juegos_planchas,
+        plan.pliegos_por_ejemplar
+    );
 
     if a.simular {
         for aviso in &avisos {
@@ -994,4 +1062,68 @@ fn preflight_cmd(a: ArgsPreflight) -> Result<()> {
     } else {
         bail!("{} errores y {} advertencias", inf.errores, inf.advertencias)
     }
+}
+
+fn combinar_cmd(datos: &Path, a: ArgsCombinar) -> Result<()> {
+    let m = Catalogo::<Maquina>::abrir(datos)?.obtener(&a.maquina)?.clone();
+    let contenidos = a
+        .entradas
+        .iter()
+        .map(|r| std::fs::read(r).with_context(|| format!("no se pudo leer {}", r.display())))
+        .collect::<Result<Vec<_>>>()?;
+    let refs: Vec<&[u8]> = contenidos.iter().map(Vec::as_slice).collect();
+    let fuente = Fuente::unir(&refs)?;
+    let (pieza, avisos) = revisar_paginas(&fuente, a.formato, a.rebase)?;
+    let paginas = fuente.paginas.len();
+    if a.dorso && paginas % 2 != 0 {
+        bail!("con --dorso las páginas deben ir en pares frente/dorso ({paginas} páginas)");
+    }
+    let n = if a.dorso { paginas / 2 } else { paginas };
+    let cantidades = if a.cantidades.is_empty() { vec![1; n] } else { a.cantidades.clone() };
+    if cantidades.len() != n {
+        bail!("hay {n} diseños y se dieron {} cantidades", cantidades.len());
+    }
+    let disenos: Vec<nup::Diseno> = cantidades
+        .iter()
+        .enumerate()
+        .map(|(i, &cantidad)| {
+            if a.dorso {
+                nup::Diseno { frente: 2 * i, dorso: Some(2 * i + 1), cantidad }
+            } else {
+                nup::Diseno { frente: i, dorso: None, cantidad }
+            }
+        })
+        .collect();
+    let volteo = match a.volteo {
+        VolteoArg::Lateral => Volteo::Lateral,
+        VolteoArg::Cabeza => Volteo::Cabeza,
+    };
+    let mut margenes = Margenes::de_maquina(&m);
+    if a.dorso && !m.duplex {
+        margenes = margenes.para_volteo(volteo);
+    }
+    let parametros = ParametrosNup {
+        pliego: pliego_de(&m, a.pliego)?,
+        margenes,
+        pieza,
+        rebase: a.rebase,
+        calle: a.calle,
+        orientacion: Orientacion::Auto,
+        marcas: opciones_marcas(a.sin_marcas, false),
+    };
+    let d = nup::calcular(&parametros)?;
+    let plan = nup::combinar(&parametros, &d, &disenos, volteo)?;
+    println!("Máquina: {} — pliego {}, {} posiciones de {pieza}", m.nombre, parametros.pliego, d.piezas());
+    for (i, x) in disenos.iter().enumerate() {
+        println!(
+            "  Diseño {}: {} pedidos → {} posiciones → {} impresos (+{})",
+            i + 1,
+            x.cantidad,
+            plan.posiciones[i],
+            plan.impresos[i],
+            plan.impresos[i] - x.cantidad
+        );
+    }
+    println!("PLIEGOS A IMPRIMIR: {}", plan.pliegos);
+    escribir_salida(&m.salida, a.correccion.correcciones(), fuente, &plan.caras, &a.entradas[0], &a.salida, avisos)
 }

@@ -35,6 +35,21 @@ const TAMANOS_FIRMA: [u32; 5] = [64, 32, 16, 8, 4];
 const ESCALON_ALZADO: f64 = 6.0;
 const ANCHO_ALZADO: f64 = 3.0;
 
+/// Cuántas firmas se montan en cada pliego.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Aprovechamiento {
+    /// Elige lo mejor: tira y retira si caben dos lado a lado, si no repetir.
+    #[default]
+    Auto,
+    /// Una firma por pliego (tiro y retiro con planchas distintas).
+    Una,
+    /// Todas las copias que quepan, en tiro y retiro.
+    Repetir,
+    /// Tiro y retiro lado a lado con la misma plancha (work & turn).
+    TiraRetira,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParametrosLibro {
     pub pliego: Tamano,
@@ -56,6 +71,8 @@ pub struct ParametrosLibro {
     /// Libros que se leen de derecha a izquierda (árabe, hebreo, manga).
     pub derecha_a_izquierda: bool,
     pub marcas: OpcionesMarcas,
+    #[serde(default)]
+    pub aprovechamiento: Aprovechamiento,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +82,10 @@ pub struct Firma {
     /// Página del libro (desde 1) para cada página local de la firma.
     pub paginas_libro: Vec<u32>,
     pub girada: bool,
+    /// Firmas completas que salen de cada pliego impreso.
+    pub copias: u32,
+    /// Tiro y retiro en la misma cara: un solo juego de planchas.
+    pub tira_retira: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +99,10 @@ pub struct PlanLibro {
     pub caras: Vec<Cara>,
     /// Desplazamiento de la hoja central (caballete).
     pub creep_max: f64,
+    /// Pliegos impresos por cada ejemplar del libro.
+    pub pliegos_por_ejemplar: f64,
+    /// Juegos de planchas (un juego por cara distinta).
+    pub juegos_planchas: u32,
     pub avisos: Vec<String>,
 }
 
@@ -130,6 +155,53 @@ fn cabe(g: &Grilla, p: &ParametrosLibro) -> Option<bool> {
         Some(true)
     } else {
         None
+    }
+}
+
+/// Área imprimible en el pliego «virtual» (orientado como el libro).
+fn area_virtual(p: &ParametrosLibro, girada: bool) -> (f64, f64, Rect) {
+    let a = p.margenes.area_imprimible(p.pliego);
+    if girada {
+        (p.pliego.alto, p.pliego.ancho, Rect::new(p.pliego.alto - a.y - a.alto, a.x, a.alto, a.ancho))
+    } else {
+        (p.pliego.ancho, p.pliego.alto, a)
+    }
+}
+
+/// Cómo se monta una firma en el pliego.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Montaje {
+    girada: bool,
+    columnas: u32,
+    filas: u32,
+    tira_retira: bool,
+}
+
+impl Montaje {
+    fn copias(&self) -> u32 {
+        self.columnas * self.filas
+    }
+}
+
+fn montaje(g: &Grilla, p: &ParametrosLibro, girada: bool) -> (Montaje, Option<String>) {
+    let (_, _, area) = area_virtual(p, girada);
+    let borde = 2.0 * p.marcas.espacio_necesario(p.rebase);
+    let columnas = (((area.ancho - borde + 1e-6) / g.ancho()).floor() as u32).max(1);
+    let filas = (((area.alto - borde + 1e-6) / g.alto()).floor() as u32).max(1);
+    let una = Montaje { girada, columnas: 1, filas: 1, tira_retira: false };
+    let repetir = Montaje { girada, columnas, filas, tira_retira: false };
+    // Tira y retira: las copias van de a pares lado a lado (el pliego se voltea de lado).
+    let pares = Montaje { girada, columnas: columnas - columnas % 2, filas, tira_retira: true };
+    let puede_tr = !girada && columnas >= 2;
+    match p.aprovechamiento {
+        Aprovechamiento::Una => (una, None),
+        Aprovechamiento::Repetir => (repetir, None),
+        Aprovechamiento::TiraRetira if puede_tr => (pares, None),
+        Aprovechamiento::TiraRetira => {
+            (repetir, Some("la firma no cabe dos veces lado a lado: se monta repetida en tiro y retiro".into()))
+        }
+        Aprovechamiento::Auto if puede_tr => (pares, None),
+        Aprovechamiento::Auto => (if repetir.copias() > 1 { repetir } else { una }, None),
     }
 }
 
@@ -225,48 +297,58 @@ pub fn planificar(p: &ParametrosLibro) -> Resultado<PlanLibro> {
 
     let mut firmas = Vec::new();
     let mut caras = Vec::new();
+    let mut pliegos_por_ejemplar = 0.0;
+    let mut juegos_planchas = 0;
     for (i, (n, paginas_libro_firma)) in tamanos.iter().zip(numeracion).enumerate() {
         let (_, esquema, girada) = esquemas
             .iter()
             .find(|(t, _, _)| t == n)
             .ok_or_else(|| Error::NoCabe(format!("firma de {n} páginas de {} en pliego {}", p.pagina, p.pliego)))?;
         let numero = i as u32 + 1;
-        let [tiro, retiro] = caras_firma(p, esquema, *girada, &paginas_libro_firma, numero, &creep);
-        caras.push(tiro);
-        caras.push(retiro);
-        firmas.push(Firma { numero, paginas: *n, paginas_libro: paginas_libro_firma, girada: *girada });
+        let (m, aviso) = montaje(&grilla(esquema, p), p, *girada);
+        if let Some(a) = aviso
+            && !avisos.contains(&a)
+        {
+            avisos.push(a);
+        }
+        caras.extend(caras_firma(p, esquema, &m, &paginas_libro_firma, numero, &creep));
+        pliegos_por_ejemplar += 1.0 / f64::from(m.copias());
+        juegos_planchas += if m.tira_retira { 1 } else { 2 };
+        firmas.push(Firma {
+            numero,
+            paginas: *n,
+            paginas_libro: paginas_libro_firma,
+            girada: *girada,
+            copias: m.copias(),
+            tira_retira: m.tira_retira,
+        });
     }
-    Ok(PlanLibro { paginas_libro, blancas, firmas, caras, creep_max, avisos })
+    Ok(PlanLibro { paginas_libro, blancas, firmas, caras, creep_max, pliegos_por_ejemplar, juegos_planchas, avisos })
 }
 
 fn caras_firma(
     p: &ParametrosLibro,
     e: &Esquema,
-    girada: bool,
+    m: &Montaje,
     paginas_libro: &[u32],
     numero: u32,
     creep: &dyn Fn(u32) -> f64,
-) -> [Cara; 2] {
+) -> Vec<Cara> {
     let g = grilla(e, p);
+    let girada = m.girada;
     // Todo se calcula en un pliego «virtual» orientado como el libro y, si
     // la firma va girada, se lleva al pliego real al final.
     let area_real = p.margenes.area_imprimible(p.pliego);
-    let (ancho_v, alto_v, area) = if girada {
-        let a = area_real;
-        (p.pliego.alto, p.pliego.ancho, Rect::new(p.pliego.alto - a.y - a.alto, a.x, a.alto, a.ancho))
-    } else {
-        (p.pliego.ancho, p.pliego.alto, area_real)
-    };
-    let x0 = area.x + (area.ancho - g.ancho()) / 2.0;
-    let y0 = area.y + (area.alto - g.alto()) / 2.0;
-    let celda_fisica = |columna: usize, fila: usize| {
-        Rect::new(
-            x0 + g.anchos[..columna].iter().sum::<f64>(),
-            y0 + g.altos[..fila].iter().sum::<f64>(),
-            g.anchos[columna],
-            g.altos[fila],
-        )
-    };
+    let (ancho_v, alto_v, area) = area_virtual(p, girada);
+    // Copias centradas en el área; en tira y retira solo la mitad izquierda
+    // lleva el tiro: el retiro reflejado cae en la mitad derecha.
+    let bx = area.x + (area.ancho - f64::from(m.columnas) * g.ancho()) / 2.0;
+    let by = area.y + (area.alto - f64::from(m.filas) * g.alto()) / 2.0;
+    let columnas_tiro = if m.tira_retira { m.columnas / 2 } else { m.columnas };
+    let origenes: Vec<(f64, f64)> = (0..m.filas)
+        .flat_map(|f| (0..columnas_tiro).map(move |c| (c, f)))
+        .map(|(c, f)| (bx + f64::from(c) * g.ancho(), by + f64::from(f) * g.alto()))
+        .collect();
 
     struct Pieza {
         lado: Lado,
@@ -274,42 +356,53 @@ fn caras_firma(
         corte: Rect,
         ubicacion: Option<Ubicacion>,
     }
-    let mut piezas = Vec::with_capacity(e.posiciones.len());
-    let mut alzado = None;
-    for pos in &e.posiciones {
-        let fisica = if pos.lado == Lado::Tiro { pos.columna } else { e.columnas - 1 - pos.columna } as usize;
-        let mut celda = celda_fisica(fisica, pos.fila as usize);
-        if pos.lado == Lado::Retiro {
-            celda = celda.reflejar_x(ancho_v);
-        }
-        let (izq, _, abajo, _) = margenes_pagina(pos, p);
-        let corte = Rect::new(celda.x + izq, celda.y + abajo, p.pagina.ancho, p.pagina.alto);
-        let recto = pos.pagina % 2 == 1;
-        let lomo_a_la_izquierda = recto != pos.invertida;
-        let pagina = paginas_libro[pos.pagina as usize - 1];
+    let mut piezas = Vec::with_capacity(e.posiciones.len() * origenes.len());
+    let mut alzados = Vec::new();
+    for &(x0, y0) in &origenes {
+        let celda_fisica = |columna: usize, fila: usize| {
+            Rect::new(
+                x0 + g.anchos[..columna].iter().sum::<f64>(),
+                y0 + g.altos[..fila].iter().sum::<f64>(),
+                g.anchos[columna],
+                g.altos[fila],
+            )
+        };
 
-        let ubicacion = (pagina <= p.paginas).then(|| {
-            let desplazamiento = creep(pagina);
-            let mut corrido = corte;
-            corrido.x += if lomo_a_la_izquierda { -desplazamiento } else { desplazamiento };
-            Ubicacion {
-                pagina: pagina as usize - 1,
-                corte: corrido,
-                giro: if pos.invertida { 180 } else { 0 },
-                recorte: corrido.expandir(p.rebase, p.rebase, p.rebase, p.rebase).interseccion(&celda),
+        for pos in &e.posiciones {
+            let fisica = if pos.lado == Lado::Tiro { pos.columna } else { e.columnas - 1 - pos.columna } as usize;
+            let mut celda = celda_fisica(fisica, pos.fila as usize);
+            if pos.lado == Lado::Retiro {
+                celda = celda.reflejar_x(ancho_v);
             }
-        });
+            let (izq, _, abajo, _) = margenes_pagina(pos, p);
+            let corte = Rect::new(celda.x + izq, celda.y + abajo, p.pagina.ancho, p.pagina.alto);
+            let recto = pos.pagina % 2 == 1;
+            let lomo_a_la_izquierda = recto != pos.invertida;
+            let pagina = paginas_libro[pos.pagina as usize - 1];
 
-        // Marca de alzado: en el pliegue del lomo junto a la primera página
-        // de la firma, bajando un escalón por cada firma.
-        if pos.pagina == 1 && !p.encuadernacion.anidada() {
-            let pasos = ((p.pagina.alto - ESCALON_ALZADO) / ESCALON_ALZADO).floor().max(1.0) as u32;
-            let escalon = f64::from((numero - 1) % pasos) * ESCALON_ALZADO;
-            let pliegue = if lomo_a_la_izquierda { celda.x } else { celda.derecha() };
-            let y = if pos.invertida { corte.y + escalon } else { corte.arriba() - escalon - ESCALON_ALZADO };
-            alzado = Some((pos.lado, Rect::new(pliegue - ANCHO_ALZADO / 2.0, y, ANCHO_ALZADO, ESCALON_ALZADO)));
+            let ubicacion = (pagina <= p.paginas).then(|| {
+                let desplazamiento = creep(pagina);
+                let mut corrido = corte;
+                corrido.x += if lomo_a_la_izquierda { -desplazamiento } else { desplazamiento };
+                Ubicacion {
+                    pagina: pagina as usize - 1,
+                    corte: corrido,
+                    giro: if pos.invertida { 180 } else { 0 },
+                    recorte: corrido.expandir(p.rebase, p.rebase, p.rebase, p.rebase).interseccion(&celda),
+                }
+            });
+
+            // Marca de alzado: en el pliegue del lomo junto a la primera página
+            // de la firma, bajando un escalón por cada firma.
+            if pos.pagina == 1 && !p.encuadernacion.anidada() {
+                let pasos = ((p.pagina.alto - ESCALON_ALZADO) / ESCALON_ALZADO).floor().max(1.0) as u32;
+                let escalon = f64::from((numero - 1) % pasos) * ESCALON_ALZADO;
+                let pliegue = if lomo_a_la_izquierda { celda.x } else { celda.derecha() };
+                let y = if pos.invertida { corte.y + escalon } else { corte.arriba() - escalon - ESCALON_ALZADO };
+                alzados.push((pos.lado, Rect::new(pliegue - ANCHO_ALZADO / 2.0, y, ANCHO_ALZADO, ESCALON_ALZADO)));
+            }
+            piezas.push(Pieza { lado: pos.lado, celda, corte, ubicacion });
         }
-        piezas.push(Pieza { lado: pos.lado, celda, corte, ubicacion });
     }
 
     // Lectura de derecha a izquierda: el mismo pliego reflejado.
@@ -329,38 +422,38 @@ fn caras_firma(
         (true, Lado::Retiro) => 270,
     };
 
-    [Lado::Tiro, Lado::Retiro].map(|lado| {
-        let propias: Vec<&Pieza> = piezas.iter().filter(|x| x.lado == lado).collect();
-        let cortes: Vec<Rect> = propias.iter().map(|x| transformar(lado, x.corte)).collect();
-        let celdas: Vec<Rect> = propias.iter().map(|x| transformar(lado, x.celda)).collect();
+    // Cada cara junta las piezas de los lados que lleva: en tira y retira,
+    // tiro y retiro van en la misma cara (y la misma plancha).
+    let armar = |lados: &[Lado], nombre: String| {
+        let propias: Vec<&Pieza> = piezas.iter().filter(|x| lados.contains(&x.lado)).collect();
+        let cortes: Vec<Rect> = propias.iter().map(|x| transformar(x.lado, x.corte)).collect();
+        let celdas: Vec<Rect> = propias.iter().map(|x| transformar(x.lado, x.celda)).collect();
         let ubicaciones = propias
             .iter()
-            .filter_map(|x| x.ubicacion.as_ref())
-            .map(|u| Ubicacion {
+            .filter_map(|x| x.ubicacion.as_ref().map(|u| (x.lado, u)))
+            .map(|(lado, u)| Ubicacion {
                 pagina: u.pagina,
                 corte: transformar(lado, u.corte),
                 recorte: transformar(lado, u.recorte),
                 giro: (u.giro + giro_extra(lado)) % 360,
             })
             .collect();
-        let mut m = marcas::generar(&cortes, p.pliego, &area_real, p.rebase, &p.marcas);
+        let mut marcas = marcas::generar(&cortes, p.pliego, &area_real, p.rebase, &p.marcas);
         if p.marcas.corte {
-            m.pliegues = marcas_plegado(&celdas, &cortes, p.rebase, &p.marcas);
+            marcas.pliegues = marcas_plegado(&celdas, &cortes, p.rebase, &p.marcas);
+            marcas.alzado =
+                alzados.iter().filter(|(l, _)| lados.contains(l)).map(|(l, r)| transformar(*l, *r)).collect();
         }
-        if let Some((lado_alzado, r)) = alzado
-            && lado_alzado == lado
-            && p.marcas.corte
-        {
-            m.alzado.push(transformar(lado, r));
-        }
-        Cara {
-            nombre: format!("Firma {numero} {}", if lado == Lado::Tiro { "tiro" } else { "retiro" }),
-            pliego: p.pliego,
-            ubicaciones,
-            marcas: m,
-            cajas: None,
-        }
-    })
+        Cara { nombre, pliego: p.pliego, ubicaciones, marcas, cajas: None }
+    };
+    if m.tira_retira {
+        vec![armar(&[Lado::Tiro, Lado::Retiro], format!("Firma {numero} · tira y retira"))]
+    } else {
+        vec![
+            armar(&[Lado::Tiro], format!("Firma {numero} tiro")),
+            armar(&[Lado::Retiro], format!("Firma {numero} retiro")),
+        ]
+    }
 }
 
 /// Marcas de plegado: en cada borde interior entre celdas, fuera del bloque.
@@ -407,6 +500,7 @@ mod pruebas {
             calibre_mm: Some(0.1),
             derecha_a_izquierda: false,
             marcas: OpcionesMarcas::default(),
+            aprovechamiento: Aprovechamiento::Una,
         }
     }
 
@@ -487,6 +581,42 @@ mod pruebas {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tira_y_retira_con_firmas_pequenas() {
+        // A5 de 8 pp (bloque 308 × 432) cabe dos veces lado a lado en 720 × 520.
+        let mut p = libro(16, Encuadernacion::Lomo);
+        p.firma = Some(8);
+        p.aprovechamiento = Aprovechamiento::Auto;
+        let plan = planificar(&p).unwrap();
+        assert_eq!(plan.firmas.len(), 2);
+        assert!(plan.firmas.iter().all(|f| f.tira_retira && f.copias == 2));
+        // Una sola cara por firma, con las 8 páginas (tiro a la izquierda, retiro a la derecha).
+        assert_eq!(plan.caras.len(), 2);
+        let cara = &plan.caras[0];
+        let mut paginas: Vec<usize> = cara.ubicaciones.iter().map(|u| u.pagina).collect();
+        paginas.sort_unstable();
+        assert_eq!(paginas, (0..8).collect::<Vec<_>>());
+        let centro = p.pliego.ancho / 2.0;
+        // La página 1 (retiro exterior) y la 2 (tiro interior) quedan en mitades opuestas.
+        let x = |pag: usize| cara.ubicaciones.iter().find(|u| u.pagina == pag).unwrap().corte.x;
+        assert!((x(0) - centro) * (x(1) - centro) < 0.0);
+        assert_eq!(plan.juegos_planchas, 2);
+        assert!((plan.pliegos_por_ejemplar - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn repetir_firmas_en_tiro_y_retiro() {
+        let mut p = libro(8, Encuadernacion::Caballete);
+        p.firma = Some(4);
+        p.aprovechamiento = Aprovechamiento::Repetir;
+        let plan = planificar(&p).unwrap();
+        // 4 pp A5 = bloque 302 × 216: 2 columnas × 2 filas.
+        assert!(plan.firmas.iter().all(|f| f.copias == 4 && !f.tira_retira));
+        assert_eq!(plan.caras.len(), 4);
+        assert!(plan.caras.iter().all(|c| c.ubicaciones.len() == 8));
+        assert_eq!(plan.juegos_planchas, 4);
     }
 
     #[test]

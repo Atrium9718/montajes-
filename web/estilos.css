@@ -292,3 +292,8 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; margin-t
 .buscando div, .ia-encontrado { display: grid; gap: 4px; }
 .ia-encontrado { margin-top: 12px; padding: 14px 16px; border-radius: 16px; background: color-mix(in srgb, var(--lima) 35%, var(--superficie)); }
 .fuentes { font-size: 13px; }
+
+/* Combinado: cantidades por diseño */
+.cantidades { display: grid; gap: 8px; }
+.cantidad { display: grid; grid-template-columns: 1fr 110px; gap: 10px; align-items: center; font-size: 14px; }
+.cantidad span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

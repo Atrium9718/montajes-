@@ -106,3 +106,38 @@ fn tarjetas_frente_y_dorso() {
     let contenido = String::from_utf8(doc.get_page_content(primera)).unwrap();
     assert_eq!(contenido.matches(" Do ").count(), 27);
 }
+
+#[test]
+fn unir_varios_pdf() {
+    let a = pdf_de_tarjetas();
+    let b = pdf_de_tarjetas();
+    let f = Fuente::unir(&[&a, &b]).unwrap();
+    assert_eq!(f.paginas.len(), 4);
+    assert!(f.paginas.iter().all(|p| (p.tamano_corte().ancho - 90.0).abs() < 0.01 && p.tiene_trimbox));
+    // Se puede imponer el resultado y releerlo.
+    let p = ParametrosNup {
+        pliego: Tamano::new(480.0, 330.0),
+        margenes: Margenes { pinza: 10.0, cola: 5.0, lateral: 5.0 },
+        pieza: Tamano::new(90.0, 50.0),
+        rebase: 3.0,
+        calle: 0.0,
+        orientacion: Orientacion::Auto,
+        marcas: OpcionesMarcas::default(),
+    };
+    let d = nup::calcular(&p).unwrap();
+    let disenos: Vec<nup::Diseno> =
+        (0..4).map(|i| nup::Diseno { frente: i, dorso: None, cantidad: 100 * (i as u32 + 1) }).collect();
+    let plan = nup::combinar(&p, &d, &disenos, Volteo::Lateral).unwrap();
+    let opciones = OpcionesSalida {
+        titulo: "Combinado".into(),
+        pdfx: VersionPdfx::X4,
+        icc: None,
+        condicion: None,
+        fecha: Some(1_760_000_000),
+        correcciones: Default::default(),
+    };
+    let (mut doc, _) = componer(f, &plan.caras, &opciones).unwrap();
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    assert_eq!(Fuente::desde_bytes(&bytes).unwrap().paginas.len(), 1);
+}

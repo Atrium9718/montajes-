@@ -137,6 +137,12 @@ pub(crate) fn resolver<'a>(doc: &'a Document, o: &'a Object) -> &'a Object {
 }
 
 impl Fuente {
+    /// Junta varios PDF (p. ej. uno por cliente) en una sola fuente, en orden.
+    pub fn unir(bytes: &[&[u8]]) -> Resultado<Self> {
+        let docs = bytes.iter().map(|b| Document::load_mem(b)).collect::<Result<Vec<_>, _>>()?;
+        Self::desde_documento(unir_documentos(docs)?)
+    }
+
     /// Documento original (solo lectura), para revisiones como el preflight.
     pub fn documento(&self) -> &Document {
         &self.doc
@@ -168,6 +174,44 @@ impl Fuente {
 }
 
 /// Atributo de página heredable (MediaBox, CropBox, Rotate, Resources).
+/// Une documentos en uno: renumera los objetos de cada uno, copia en cada
+/// página los atributos que heredaba (cajas, giro, recursos) y arma un árbol
+/// de páginas nuevo con todas, en orden.
+pub fn unir_documentos(docs: Vec<Document>) -> Resultado<Document> {
+    let mut base = Document::with_version("1.6");
+    let mut paginas = Vec::new();
+    let mut siguiente = 1;
+    for mut d in docs {
+        if d.is_encrypted() {
+            return Err(Error::Invalido("uno de los PDF está protegido con contraseña".into()));
+        }
+        for (_, id) in d.get_pages() {
+            for clave in [&b"MediaBox"[..], b"CropBox", b"Rotate", b"Resources"] {
+                let falta = d.get_dictionary(id).map(|p| !p.has(clave)).unwrap_or(false);
+                if falta && let Some(valor) = heredado(&d, id, clave) {
+                    d.get_dictionary_mut(id)?.set(clave.to_vec(), valor);
+                }
+            }
+        }
+        d.renumber_objects_with(siguiente);
+        siguiente = d.objects.keys().map(|k| k.0).max().unwrap_or(siguiente) + 1;
+        paginas.extend(d.get_pages().into_values());
+        base.objects.extend(d.objects);
+    }
+    base.max_id = siguiente;
+    let arbol = base.new_object_id();
+    for id in &paginas {
+        base.get_dictionary_mut(*id)?.set("Parent", arbol);
+    }
+    let hijos: Vec<Object> = paginas.iter().map(|id| Object::Reference(*id)).collect();
+    let cantidad = hijos.len() as i64;
+    base.objects
+        .insert(arbol, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => hijos, "Count" => cantidad }));
+    let catalogo = base.add_object(dictionary! { "Type" => "Catalog", "Pages" => arbol });
+    base.trailer.set("Root", catalogo);
+    Ok(base)
+}
+
 fn heredado(doc: &Document, pagina: ObjectId, clave: &[u8]) -> Option<Object> {
     let mut actual = doc.get_dictionary(pagina).ok()?;
     for _ in 0..64 {
