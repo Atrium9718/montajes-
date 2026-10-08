@@ -635,9 +635,21 @@ function selectorPapel(prefijo, o, maquina, papel) {
       <label class="campo"><span>Ancho (mm)</span><input type="number" id="${prefijo}-pliego-ancho" value="${o.pliegoAncho ?? ""}"></label>
       <label class="campo"><span>Alto (mm)</span><input type="number" id="${prefijo}-pliego-alto" value="${o.pliegoAlto ?? ""}"></label>
       <button class="boton boton-claro boton-chico" type="button" id="${prefijo}-guardar-tam" style="align-self:end">Guardar tamaño</button></div>` : ""}
-    <small>Solo aparecen los tamaños que caben en ${esc(maquina.nombre)}. Abajo se comparan para ver cuál gasta menos papel.</small></div>`;
+    <small>Solo aparecen los tamaños que caben en ${esc(maquina.nombre)}. Abajo se comparan para ver cuál gasta menos papel.</small>
+    <div class="campo"><span>Papel en la máquina</span>${chips(`${prefijo}-orientacion-papel`, [["auto", "Automático (lo que más rinda)"], ["horizontal", "Horizontal"], ["vertical", "Vertical"]], o.orientacionPapel || "auto")}</div></div>`;
 }
+const orientacionPapel = (o) => o.orientacionPapel || "auto";
+/** «horizontal» o «vertical» según cómo quedó el pliego. */
+const comoPapel = (t) => (t.ancho >= t.alto ? "horizontal" : "vertical");
 function conectarSelectorPapel(prefijo, o, alCambiar) {
+  $$(`[data-chips="${prefijo}-orientacion-papel"]`).forEach((g) => g.addEventListener("click", (e) => {
+    const b = e.target.closest(".chip");
+    if (!b) return;
+    e.stopPropagation();
+    $$(".chip", g).forEach((c) => c.setAttribute("aria-pressed", String(c === b)));
+    o.orientacionPapel = b.dataset.valor;
+    alCambiar(false);
+  }));
   $(`#${prefijo}-papel-tam`)?.addEventListener("change", (e) => { e.stopPropagation(); o.papelTam = e.target.value; alCambiar(true); });
   for (const lado of ["ancho", "alto"]) {
     $(`#${prefijo}-pliego-${lado}`)?.addEventListener("change", (e) => {
@@ -695,7 +707,7 @@ function pintarCompararLibro() {
       const pl = r.plan, pliegos = pl.pliegos_por_ejemplar;
       const porPliego = Math.round(pl.paginas_libro / pliegos);
       filas.push({
-        ...f, pliegos, area: (pliegos * f.ancho * f.alto) / 1e6,
+        ...f, ancho: r.pliego.ancho, alto: r.pliego.alto, nombre: `${f.nombre} · ${comoPapel(r.pliego)}`, pliegos, area: (pliegos * f.ancho * f.alto) / 1e6,
         aprovecha: (100 * pl.paginas_libro * f0.ancho * f0.alto) / (2 * pliegos * f.ancho * f.alto),
         cabe: `${porPliego} págs. (${porPliego / 2} por cara)`, etiquetaCabe: "Páginas por pliego",
         pliegosTexto: mm(pliegos, 2), etiquetaPliegos: "Pliegos por libro",
@@ -722,7 +734,7 @@ function pintarCompararPiezas() {
       const n = r.distribucion.columnas * r.distribucion.filas;
       const pliegos = Math.ceil(1000 / n);
       filas.push({
-        ...f, pliegos, area: (pliegos * f.ancho * f.alto) / 1e6, aprovecha: (100 * n * f0.ancho * f0.alto) / (f.ancho * f.alto),
+        ...f, ancho: r.pliego.ancho, alto: r.pliego.alto, nombre: `${f.nombre} · ${comoPapel(r.pliego)}`, pliegos, area: (pliegos * f.ancho * f.alto) / 1e6, aprovecha: (100 * n * f0.ancho * f0.alto) / (f.ancho * f.alto),
         cabe: `${n} piezas`, etiquetaCabe: "Caben", pliegosTexto: mm(pliegos, 0), etiquetaPliegos: "Pliegos por 1.000",
       });
     } catch { /* no cabe */ }
@@ -861,7 +873,7 @@ function peticionPiezas(maquina, info, orientacion) {
   const o = estado.piezas.op;
   const pliego = pliegoDe(o, maquina);
   return {
-    maquina, formato: info.formato, paginas: info.paginas.length, pliego,
+    maquina, formato: info.formato, paginas: info.paginas.length, pliego, orientacion_papel: orientacionPapel(o),
     rebase: o.rebase, calle: o.calle, orientacion: orientacion || o.orientacion,
     dorso: o.dorso, volteo: o.volteo, marcas: o.marcas, tira_color: o.tira,
     titulo: base(estado.piezas.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
@@ -899,6 +911,7 @@ function calcularPiezas() {
       } else {
         explicacion = `Van <span class="resaltado">${d.columnas} columnas × ${d.filas} filas</span>${t.op.calle > 0 ? `, con ${mm(t.op.calle)} mm de calle` : ", con corte compartido"}.`;
       }
+      if (t.plan?.pliego) explicacion += ` Papel ${comoPapel(t.plan.pliego)} de ${cm(t.plan.pliego.ancho)} × ${cm(t.plan.pliego.alto)} cm.`;
     } catch (e) { errorPlan = String(e.message || e); }
   }
   const d = t.plan?.distribucion;
@@ -1421,7 +1434,7 @@ function peticionLibro(maquina, info) {
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
     derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: o.aprovechamiento || "auto",
     volteo: !o.volteo || o.volteo === "maquina" ? null : o.volteo,
-    pliego: pliegoDe(o, maquina),
+    pliego: pliegoDe(o, maquina), orientacion_papel: orientacionPapel(o),
     titulo: base(estado.libro.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
   };
 }
@@ -1449,7 +1462,8 @@ function calcularLibro() {
     composicion = grupos.map((g) => `${g.c} × ${g.n} pp`).join(" + ");
     const girada = p.firmas.some((f) => f.girada);
     const o = t.op;
-    explicacion = `${p.paginas_libro} páginas en <span class="resaltado">${composicion}</span>${girada ? ", con la firma girada 90° para que quepa en el pliego" : ""}. `;
+    const hoja = t.plan.pliego;
+    explicacion = `${p.paginas_libro} páginas en <span class="resaltado">${composicion}</span>${girada ? ", con la firma girada 90° para que quepa en el pliego" : ""}, en papel ${comoPapel(hoja)} de ${cm(hoja.ancho)} × ${cm(hoja.alto)} cm. `;
     explicacion += o.encuadernacion === "caballete" ? "Las firmas van anidadas una dentro de otra." : "Las firmas se alzan una tras otra" + (o.encuadernacion === "lomo" ? `, con ${mm(o.fresado)} mm de fresado en el lomo.` : ".");
     if (p.blancas) explicacion += ` Se agregan <b>${p.blancas}</b> páginas en blanco al final.`;
     const multiples = p.firmas.filter((f) => f.copias > 1);

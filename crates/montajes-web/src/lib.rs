@@ -128,6 +128,42 @@ fn pliego(m: &Maquina, pedido: Option<Tamano>) -> R<Tamano> {
     Ok(p)
 }
 
+/// Cómo se acomoda el papel en la máquina.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OrientacionPapel {
+    /// Prueba horizontal y vertical y se queda con la que da más cabida.
+    #[default]
+    Auto,
+    Horizontal,
+    Vertical,
+}
+
+/// Pliegos a probar: el papel en las orientaciones pedidas que entran en la
+/// máquina (primero como viene, luego girado).
+fn pliegos_candidatos(m: &Maquina, pedido: Option<Tamano>, o: OrientacionPapel) -> R<Vec<Tamano>> {
+    let base = pedido.unwrap_or(m.pliego_max);
+    let horizontal = Tamano::new(base.ancho.max(base.alto), base.ancho.min(base.alto));
+    let vertical = horizontal.girado();
+    let lista = match o {
+        OrientacionPapel::Auto => vec![base, base.girado()],
+        OrientacionPapel::Horizontal => vec![horizontal],
+        OrientacionPapel::Vertical => vec![vertical],
+    };
+    let entra = |t: &Tamano| t.ancho <= m.pliego_max.ancho + 0.01 && t.alto <= m.pliego_max.alto + 0.01;
+    let mut buenos: Vec<Tamano> = Vec::new();
+    for t in lista {
+        if entra(&t) && !buenos.iter().any(|b| (b.ancho - t.ancho).abs() < 0.01 && (b.alto - t.alto).abs() < 0.01) {
+            buenos.push(pliego(m, Some(t))?);
+        }
+    }
+    if buenos.is_empty() {
+        let como = if o == OrientacionPapel::Vertical { "vertical" } else { "horizontal" };
+        return Err(error(format!("el papel {base} no entra {como} en «{}» ({})", m.nombre, m.pliego_max)));
+    }
+    Ok(buenos)
+}
+
 fn marcas(con_marcas: bool, tira_color: bool) -> OpcionesMarcas {
     let mut m = if con_marcas { OpcionesMarcas::default() } else { OpcionesMarcas::ninguna() };
     m.tira_color = m.tira_color && tira_color;
@@ -244,6 +280,8 @@ struct PeticionNup {
     paginas: usize,
     #[serde(default)]
     pliego: Option<Tamano>,
+    #[serde(default)]
+    orientacion_papel: OrientacionPapel,
     #[serde(default = "tres")]
     rebase: f64,
     #[serde(default)]
@@ -295,16 +333,32 @@ fn plan_nup(p: &PeticionNup) -> R<(ParametrosNup, Distribucion, Vec<Cara>)> {
     if p.dorso && !p.maquina.duplex {
         margenes = margenes.para_volteo(p.volteo);
     }
-    let parametros = ParametrosNup {
-        pliego: pliego(&p.maquina, p.pliego)?,
-        margenes,
-        pieza: p.formato,
-        rebase: p.rebase,
-        calle: p.calle,
-        orientacion: p.orientacion,
-        marcas: marcas(p.marcas, p.tira_color),
+    // El papel horizontal o vertical: gana el que da más piezas por pliego.
+    let mut mejor: Option<(ParametrosNup, Distribucion)> = None;
+    let mut ultimo_error = None;
+    for hoja in pliegos_candidatos(&p.maquina, p.pliego, p.orientacion_papel)? {
+        let par = ParametrosNup {
+            pliego: hoja,
+            margenes,
+            pieza: p.formato,
+            rebase: p.rebase,
+            calle: p.calle,
+            orientacion: p.orientacion,
+            marcas: marcas(p.marcas, p.tira_color),
+        };
+        match nup::calcular(&par) {
+            Ok(d) => {
+                if mejor.as_ref().is_none_or(|(_, m)| d.piezas() > m.piezas()) {
+                    mejor = Some((par, d));
+                }
+            }
+            Err(e) => ultimo_error = Some(e),
+        }
+    }
+    let (parametros, d) = match mejor {
+        Some(x) => x,
+        None => return Err(error(ultimo_error.map(|e| e.to_string()).unwrap_or_default())),
     };
-    let d = nup::calcular(&parametros).map_err(error)?;
     let caras = nup::caras_trabajo(&parametros, &d, p.paginas, p.dorso.then_some(p.volteo));
     Ok((parametros, d, caras))
 }
@@ -624,6 +678,8 @@ struct PeticionLibro {
     /// Volteo del retiro; si falta, el de la máquina.
     #[serde(default)]
     volteo: Option<Volteo>,
+    #[serde(default)]
+    orientacion_papel: OrientacionPapel,
 }
 
 #[derive(Serialize)]
@@ -640,8 +696,8 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
     // Volteo del retiro: el de la petición o el de la máquina. De cabeza, la
     // pinza y la cola deben quedar iguales para que el retiro calce.
     let volteo = p.volteo.unwrap_or(p.maquina.volteo);
-    let parametros = ParametrosLibro {
-        pliego: pliego(&p.maquina, p.pliego)?,
+    let base = ParametrosLibro {
+        pliego: p.maquina.pliego_max,
         margenes: Margenes::de_maquina(&p.maquina).para_volteo(volteo),
         pagina: p.formato,
         paginas: if p.mapa.is_empty() { p.paginas } else { p.mapa.len() as u32 },
@@ -658,7 +714,30 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
         mapa: p.mapa.clone(),
         volteo,
     };
-    let plan = firmas::planificar(&parametros).map_err(error)?;
+    // El papel horizontal o vertical: gana el que gasta menos pliegos por
+    // ejemplar (y, empatados, el de menos pliegos distintos).
+    let mut mejor: Option<(ParametrosLibro, PlanLibro)> = None;
+    let mut ultimo_error = None;
+    for hoja in pliegos_candidatos(&p.maquina, p.pliego, p.orientacion_papel)? {
+        let par = ParametrosLibro { pliego: hoja, ..base.clone() };
+        match firmas::planificar(&par) {
+            Ok(plan) => {
+                let mejora = mejor.as_ref().is_none_or(|(_, m)| {
+                    plan.pliegos_por_ejemplar < m.pliegos_por_ejemplar - 1e-9
+                        || ((plan.pliegos_por_ejemplar - m.pliegos_por_ejemplar).abs() < 1e-9
+                            && plan.caras.len() < m.caras.len())
+                });
+                if mejora {
+                    mejor = Some((par, plan));
+                }
+            }
+            Err(e) => ultimo_error = Some(e),
+        }
+    }
+    let (parametros, plan) = match mejor {
+        Some(x) => x,
+        None => return Err(error(ultimo_error.map(|e| e.to_string()).unwrap_or_default())),
+    };
     let lomo = p.calibre_um.map(|c| f64::from(plan.paginas_libro / 2) * c / 1000.0);
     Ok((parametros, plan, lomo))
 }
