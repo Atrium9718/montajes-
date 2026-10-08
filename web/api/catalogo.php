@@ -24,11 +24,33 @@ $carpeta = carpeta_datos();
 $id = hash('sha256', 'macula-empresa:' . $sesion['empresa']['id']);
 $archivo = "$carpeta/$id.json";
 
-// Migración: el catálogo guardado antes con el código del taller pasa a la empresa.
+// Migración: el catálogo guardado antes con el código del taller se une
+// (una sola vez por código) al de la empresa.
 $codigo = $_SERVER['HTTP_X_TALLER'] ?? '';
-if (!is_file($archivo) && preg_match('/^[A-Za-z0-9-]{16,64}$/', $codigo)) {
-    $viejo = "$carpeta/" . hash('sha256', 'montajes:' . $codigo) . '.json';
-    if (is_file($viejo)) copy($viejo, $archivo);
+if (preg_match('/^[A-Za-z0-9-]{16,64}$/', $codigo)) {
+    $huella = hash('sha256', 'montajes:' . $codigo);
+    $viejo = "$carpeta/$huella.json";
+    $actual = is_file($archivo) ? (json_decode((string) file_get_contents($archivo), true) ?: []) : [];
+    if (is_file($viejo) && empty($actual['migrados'][$huella])) {
+        $anterior = json_decode((string) file_get_contents($viejo), true) ?: [];
+        $unir = function (array $a, array $b): array {
+            $por = [];
+            foreach (array_merge($a, $b) as $x) {
+                $id = (string) ($x['id'] ?? '');
+                if ($id === '') continue;
+                if (!isset($por[$id]) || ($x['modificado'] ?? 0) > ($por[$id]['modificado'] ?? 0)) $por[$id] = $x;
+            }
+            return array_values($por);
+        };
+        $actual['formato'] = 'montajes-catalogo';
+        $actual['version'] = 1;
+        $actual['actualizado'] = time();
+        $actual['maquinas'] = $unir($actual['maquinas'] ?? [], $anterior['maquinas'] ?? []);
+        $actual['papeles'] = $unir($actual['papeles'] ?? [], $anterior['papeles'] ?? []);
+        $actual['borrados'] = $actual['borrados'] ?? new stdClass();
+        $actual['migrados'][$huella] = time();
+        file_put_contents($archivo, json_encode($actual, JSON_UNESCAPED_UNICODE), LOCK_EX);
+    }
 }
 
 $metodo = $_SERVER['REQUEST_METHOD'] ?? 'GET';
@@ -63,6 +85,8 @@ if ($metodo === 'POST') {
         'papeles' => array_values($datos['papeles']),
         'borrados' => is_array($datos['borrados'] ?? null) ? $datos['borrados'] : new stdClass(),
     ];
+    $previoMigrados = is_file($archivo) ? (json_decode((string) file_get_contents($archivo), true)['migrados'] ?? null) : null;
+    if ($previoMigrados) $guardar['migrados'] = $previoMigrados;
     // Sin cambios: no se reescribe ni se crea un respaldo.
     if (is_file($archivo)) {
         $previo = json_decode((string) file_get_contents($archivo), true);
