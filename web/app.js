@@ -577,6 +577,161 @@ function conectarPaginador(raiz, trabajo, redibujar) {
   $$("[data-cara]", raiz).forEach((b) => b.addEventListener("click", () => { trabajo.cara = Number(b.dataset.cara); redibujar(); }));
 }
 
+// ───────────── Tamaños de papel (pliego de impresión) ─────────────
+const FORMATOS_PAPEL = [
+  ["carta", "Carta", 216, 279], ["oficio", "Oficio", 216, 330], ["tabloide", "Tabloide", 279, 432],
+  ["tabloide_extra", "Tabloide extra", 330, 480], ["sra3", "SRA3", 320, 450], ["cuarto", "1/4 de pliego", 350, 500],
+  ["tercio", "1/3 de pliego", 330, 700], ["medio", "1/2 pliego", 500, 700], ["pliego", "Pliego", 700, 1000],
+];
+const cm = (v) => mm(v / 10, 1);
+
+/** El tamaño girado como el pliego máximo de la máquina (apaisado o vertical). */
+function orientarPapel(f, maquina) {
+  const apaisada = maquina.pliego_max.ancho >= maquina.pliego_max.alto;
+  const [a, b] = [Math.max(f.ancho, f.alto), Math.min(f.ancho, f.alto)];
+  return apaisada ? { ...f, ancho: a, alto: b } : { ...f, ancho: b, alto: a };
+}
+function cabeEnMaquina(f, m) {
+  const min = m.pliego_min;
+  return f.ancho <= m.pliego_max.ancho + 0.01 && f.alto <= m.pliego_max.alto + 0.01 && (!min || (Math.max(f.ancho, f.alto) >= Math.max(min.ancho, min.alto) - 0.01 && Math.min(f.ancho, f.alto) >= Math.min(min.ancho, min.alto) - 0.01));
+}
+/** Tamaños que caben en la máquina: el máximo, los comunes, los del papel elegido y los propios. */
+function formatosParaMaquina(maquina, papel) {
+  if (!maquina) return [];
+  const max = maquina.pliego_max;
+  const igual = FORMATOS_PAPEL.find(([, , a, b]) => Math.abs(Math.max(a, b) - Math.max(max.ancho, max.alto)) < 1 && Math.abs(Math.min(a, b) - Math.min(max.ancho, max.alto)) < 1);
+  const lista = [{ id: "maquina", nombre: igual ? `${igual[1]} (máximo de la máquina)` : "Máximo de la máquina", ancho: max.ancho, alto: max.alto }];
+  const extra = [
+    ...FORMATOS_PAPEL.map(([id, nombre, a, b]) => ({ id, nombre, ancho: a, alto: b })),
+    ...(papel?.pliegos || []).map((t) => ({ id: `${t.ancho}x${t.alto}`, nombre: `Del papel ${papel.nombre}`, ancho: t.ancho, alto: t.alto })),
+    ...(estado.preferencias.formatosPapel || []).map((t) => ({ id: `${t.ancho}x${t.alto}`, nombre: t.nombre || "Propio", ancho: t.ancho, alto: t.alto })),
+  ];
+  for (const f of extra.map((x) => orientarPapel(x, maquina))) {
+    if (!cabeEnMaquina(f, maquina)) continue;
+    if (lista.some((x) => Math.abs(x.ancho - f.ancho) < 1 && Math.abs(x.alto - f.alto) < 1)) continue;
+    lista.push(f);
+  }
+  return lista;
+}
+/** Pliego pedido al motor (null = máximo de la máquina). */
+function pliegoDe(o, maquina) {
+  if (!maquina || !o.papelTam || o.papelTam === "maquina") return null;
+  if (o.papelTam === "otro") {
+    const a = num(o.pliegoAncho), b = num(o.pliegoAlto);
+    return a > 0 && b > 0 ? orientarPapel({ ancho: a, alto: b }, maquina) : null;
+  }
+  const f = formatosParaMaquina(maquina, null).find((x) => x.id === o.papelTam)
+    || (/^\d+(\.\d+)?x\d+(\.\d+)?$/.test(o.papelTam) ? orientarPapel({ ancho: Number(o.papelTam.split("x")[0]), alto: Number(o.papelTam.split("x")[1]) }, maquina) : null);
+  return f ? { ancho: f.ancho, alto: f.alto } : null;
+}
+function selectorPapel(prefijo, o, maquina, papel) {
+  if (!maquina) return "";
+  const lista = formatosParaMaquina(maquina, papel);
+  const valor = o.papelTam || "maquina";
+  return `<div class="campo"><span>Tamaño del papel (pliego)</span>
+    <select id="${prefijo}-papel-tam">${lista.map((f) => `<option value="${esc(f.id)}" ${f.id === valor ? "selected" : ""}>${esc(f.nombre)} · ${cm(f.ancho)} × ${cm(f.alto)} cm</option>`).join("")}
+      <option value="otro" ${valor === "otro" ? "selected" : ""}>Otro tamaño…</option></select>
+    ${valor === "otro" ? `<div class="fila-3">
+      <label class="campo"><span>Ancho (mm)</span><input type="number" id="${prefijo}-pliego-ancho" value="${o.pliegoAncho ?? ""}"></label>
+      <label class="campo"><span>Alto (mm)</span><input type="number" id="${prefijo}-pliego-alto" value="${o.pliegoAlto ?? ""}"></label>
+      <button class="boton boton-claro boton-chico" type="button" id="${prefijo}-guardar-tam" style="align-self:end">Guardar tamaño</button></div>` : ""}
+    <small>Solo aparecen los tamaños que caben en ${esc(maquina.nombre)}. Abajo se comparan para ver cuál gasta menos papel.</small></div>`;
+}
+function conectarSelectorPapel(prefijo, o, alCambiar) {
+  $(`#${prefijo}-papel-tam`)?.addEventListener("change", (e) => { e.stopPropagation(); o.papelTam = e.target.value; alCambiar(true); });
+  for (const lado of ["ancho", "alto"]) {
+    $(`#${prefijo}-pliego-${lado}`)?.addEventListener("change", (e) => {
+      e.stopPropagation();
+      o[lado === "ancho" ? "pliegoAncho" : "pliegoAlto"] = e.target.value || null;
+      alCambiar(false);
+    });
+  }
+  $(`#${prefijo}-guardar-tam`)?.addEventListener("click", () => {
+    const a = num(o.pliegoAncho), b = num(o.pliegoAlto);
+    if (!(a > 0 && b > 0)) { avisar("Escribe ancho y alto"); return; }
+    const nombre = prompt("Nombre para este tamaño", `${cm(a)} × ${cm(b)}`) || `${cm(a)} × ${cm(b)}`;
+    preferir("formatosPapel", [...(estado.preferencias.formatosPapel || []).filter((x) => !(x.ancho === a && x.alto === b)), { nombre, ancho: a, alto: b }]);
+    o.papelTam = `${a}x${b}`;
+    avisar("Tamaño guardado");
+    alCambiar(true);
+  });
+}
+
+/** Tabla que compara tamaños de papel: cuál usa menos pliegos y menos área. */
+function tarjetaComparar(prefijo, filas, actual, digital) {
+  if (filas.length < 2) return "";
+  const ordenadas = [...filas].sort((a, b) => (digital ? a.pliegos - b.pliegos || a.area - b.area : a.area - b.area || a.pliegos - b.pliegos));
+  const mejor = ordenadas[0];
+  return `<section class="tarjeta paso comparar-papel">
+    <div class="paso-titulo"><h3>¿En qué papel sale mejor?</h3></div>
+    <p class="tenue" style="font-size:14px">${digital ? "En digital se cobra por pliego impreso: gana el que imprime menos pliegos." : "En offset el costo va con el área de papel: gana el que gasta menos papel."} Mejor opción: <b>${esc(mejor.nombre)} (${cm(mejor.ancho)} × ${cm(mejor.alto)} cm)</b>.</p>
+    <div class="tabla-desliza"><table class="tabla"><thead><tr><th>Papel</th><th>${filas[0].etiquetaCabe}</th><th>${filas[0].etiquetaPliegos}</th><th>Papel usado</th><th>Aprovecha</th><th></th></tr></thead><tbody>
+      ${ordenadas.map((f) => `<tr class="${f.id === actual ? "fila-actual" : ""}">
+        <td><b>${esc(f.nombre)}</b><br><span class="tenue">${cm(f.ancho)} × ${cm(f.alto)} cm</span></td>
+        <td>${f.cabe}</td><td class="num">${f.pliegosTexto}</td><td class="num">${mm(f.area, 3)} m²</td><td class="num">${mm(f.aprovecha, 0)} %</td>
+        <td>${f.id === actual ? `<span class="sello sello-ok">En uso</span>` : `<button class="boton boton-claro boton-chico" type="button" data-usar-papel="${esc(f.id)}">Usar</button>`}${f === mejor && f.id !== actual ? ` <span class="etiqueta">mejor</span>` : ""}</td>
+      </tr>`).join("")}
+    </tbody></table></div>
+  </section>`;
+}
+
+function conectarComparar(caja, o, redibujar) {
+  $$("[data-usar-papel]", caja).forEach((b) => b.addEventListener("click", () => { o.papelTam = b.dataset.usarPapel; redibujar(); }));
+}
+
+function pintarCompararLibro() {
+  const caja = $("#lb-comparar");
+  if (!caja) return;
+  const t = estado.libro, o = t.op;
+  const maquina = maquinaElegida("lb-maquina");
+  if (!t.info || !t.plan || !maquina) { pintar(caja, ""); return; }
+  const base = peticionLibro(maquina, t.info);
+  const papel = estado.papeles.find((p) => p.id === $("#lb-papel")?.value);
+  const f0 = base.formato;
+  const filas = [];
+  for (const f of formatosParaMaquina(maquina, papel)) {
+    try {
+      const r = JSON.parse(motor.planear_libro(JSON.stringify({ ...base, pliego: f.id === "maquina" ? null : { ancho: f.ancho, alto: f.alto } })));
+      const pl = r.plan, pliegos = pl.pliegos_por_ejemplar;
+      const porPliego = Math.round(pl.paginas_libro / pliegos);
+      filas.push({
+        ...f, pliegos, area: (pliegos * f.ancho * f.alto) / 1e6,
+        aprovecha: (100 * pl.paginas_libro * f0.ancho * f0.alto) / (2 * pliegos * f.ancho * f.alto),
+        cabe: `${porPliego} págs. (${porPliego / 2} por cara)`, etiquetaCabe: "Páginas por pliego",
+        pliegosTexto: mm(pliegos, 2), etiquetaPliegos: "Pliegos por libro",
+      });
+    } catch { /* no cabe ni una firma */ }
+  }
+  const actual = filas.find((f) => f.id === (o.papelTam || "maquina"))?.id || (o.papelTam || "maquina");
+  if (!pintar(caja, tarjetaComparar("lb", filas, actual, maquina.tipo === "digital"))) return;
+  conectarComparar(caja, o, () => { t.cara = 0; vistaLibro($("#vista")); });
+}
+
+function pintarCompararPiezas() {
+  const caja = $("#pz-comparar");
+  if (!caja) return;
+  const t = estado.piezas, o = t.op;
+  const maquina = maquinaElegida("pz-maquina");
+  if (o.modo !== "repetir" || !t.info?.formato || !t.plan || !maquina) { pintar(caja, ""); return; }
+  const base = peticionPiezas(maquina, t.info);
+  const f0 = t.info.formato;
+  const filas = [];
+  for (const f of formatosParaMaquina(maquina, null)) {
+    try {
+      const r = JSON.parse(motor.planear_nup(JSON.stringify({ ...base, pliego: f.id === "maquina" ? null : { ancho: f.ancho, alto: f.alto } })));
+      const n = r.distribucion.columnas * r.distribucion.filas;
+      const pliegos = Math.ceil(1000 / n);
+      filas.push({
+        ...f, pliegos, area: (pliegos * f.ancho * f.alto) / 1e6, aprovecha: (100 * n * f0.ancho * f0.alto) / (f.ancho * f.alto),
+        cabe: `${n} piezas`, etiquetaCabe: "Caben", pliegosTexto: mm(pliegos, 0), etiquetaPliegos: "Pliegos por 1.000",
+      });
+    } catch { /* no cabe */ }
+  }
+  const actual = o.papelTam || "maquina";
+  if (!pintar(caja, tarjetaComparar("pz", filas, actual, maquina.tipo === "digital"))) return;
+  conectarComparar(caja, o, () => vistaPiezas($("#vista")));
+}
+
 // ───────────── Piezas sueltas (n-up) ─────────────
 function vistaPiezas(main) {
   const t = estado.piezas;
@@ -600,22 +755,19 @@ function vistaPiezas(main) {
             <label class="campo"><span>Calle (mm)</span><input type="number" step="0.5" min="0" id="pz-calle" value="${o.calle}"><small>0 = corte compartido</small></label>
           </div>
           <div class="campo"><span>Orientación</span>${chips("orientacion", [["auto", "Automática"], ["normal", "Normal"], ["girada", "Girada 90°"]], o.orientacion)}</div>
+          ${selectorPapel("pz", o, maquinaElegida("pz-maquina"), null)}
           ${interruptor("pz-dorso", "Frente y dorso (páginas en pares)", o.dorso)}
           ${o.dorso ? `<div class="campo"><span>Volteo del pliego</span>${chips("volteo", [["lateral", "Tira y retira (lateral)"], ["cabeza", "De cabeza (tumble)"]], o.volteo)}</div>` : ""}
           <details class="avanzado"><summary>Marcas y pliego</summary>
             <div class="paso">
               ${interruptor("pz-marcas", "Marcas de corte y registro", o.marcas)}
               ${interruptor("pz-tira", "Tira de control de color", o.tira)}
-              <div class="fila">
-                <label class="campo"><span>Pliego ancho</span><input type="number" id="pz-pliego-ancho" placeholder="máx." value="${o.pliegoAncho ?? ""}"></label>
-                <label class="campo"><span>Pliego alto</span><input type="number" id="pz-pliego-alto" placeholder="máx." value="${o.pliegoAlto ?? ""}"></label>
-              </div>
             </div>
           </details>
           ${bloqueCorrecciones("pz")}
         </section>
       </div>
-      <div class="columna-resultado"><div class="resultado" id="pz-resultado"></div><div id="pz-cotizacion"></div></div>
+      <div class="columna-resultado"><div class="resultado" id="pz-resultado"></div><div id="pz-comparar"></div><div id="pz-cotizacion"></div></div>
     </div>`;
 
   if (o.modo === "combinar") {
@@ -636,13 +788,12 @@ function vistaPiezas(main) {
     o.dorso = $("#pz-dorso").checked;
     o.marcas = $("#pz-marcas").checked;
     o.tira = $("#pz-tira").checked;
-    o.pliegoAncho = $("#pz-pliego-ancho").value || null;
-    o.pliegoAlto = $("#pz-pliego-alto").value || null;
     if ($("#pz-maquina")) preferir("maquina", $("#pz-maquina").value);
   };
   conectarCorrecciones(main, () => vistaPiezas(main));
+  conectarSelectorPapel("pz", o, (redibujar) => (redibujar ? vistaPiezas(main) : calcularPiezas()));
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file" || el.dataset.correccion || el.dataset.cantidad) return;
+    if (el.type === "file" || el.dataset.correccion || el.dataset.cantidad || /papel-tam|pliego-(ancho|alto)/.test(el.id)) return;
     const antes = { dorso: o.dorso, rebase: o.rebase, maquina: estado.preferencias.maquina };
     leerOpciones();
     if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaPiezas(main); return; }
@@ -708,7 +859,7 @@ function bloqueCantidades(t) {
 
 function peticionPiezas(maquina, info, orientacion) {
   const o = estado.piezas.op;
-  const pliego = o.pliegoAncho && o.pliegoAlto ? { ancho: num(o.pliegoAncho), alto: num(o.pliegoAlto) } : null;
+  const pliego = pliegoDe(o, maquina);
   return {
     maquina, formato: info.formato, paginas: info.paginas.length, pliego,
     rebase: o.rebase, calle: o.calle, orientacion: orientacion || o.orientacion,
@@ -770,6 +921,7 @@ function calcularPiezas() {
     ${listaAvisos(t.plan?.avisos)}
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver el pliego" : "Sube un PDF para ver el montaje")}`;
   pintarCotizacion("piezas");
+  pintarCompararPiezas();
   const carasPz = t.plan?.caras ?? t.plan?.plan?.caras;
   if (carasPz?.length) pedirMiniaturas(t, carasPz[Math.min(t.cara, carasPz.length - 1)].ubicaciones.map((u) => u.pagina), calcularPiezas);
   if (!pintar(caja, html)) return;
@@ -1204,6 +1356,7 @@ function vistaLibro(main) {
           <div class="paso-titulo"><span class="paso-num">2</span><h3>Encuadernación</h3></div>
           ${chips("encuadernacion", [["caballete", "Caballete"], ["lomo", "Al lomo (PUR)"], ["cosido", "Cosido"]], o.encuadernacion)}
           ${selectorMaquina("lb-maquina")}
+          ${selectorPapel("lb", o, maquinaElegida("lb-maquina"), papeles.find((p) => p.id === papelElegido))}
           <label class="campo"><span>Papel de la tripa</span>
             <select id="lb-papel"><option value="">Sin papel (no calcula creep ni lomo)</option>${papeles.map((p) => `<option value="${esc(p.id)}" ${p.id === papelElegido ? "selected" : ""}>${esc(p.nombre)} · ${p.calibre_um} µm</option>`).join("")}</select>
             ${papeles.length ? "" : `<small><a href="#catalogos">Agrega papeles</a> para calcular el lomo y el creep.</small>`}
@@ -1228,14 +1381,15 @@ function vistaLibro(main) {
           ${bloqueCorrecciones("lb")}
         </section>
       </div>
-      <div class="columna-resultado"><div class="resultado" id="lb-resultado"></div><div id="lb-caratula"></div><div id="lb-guardas"></div><div id="lb-cotizacion"></div></div>
+      <div class="columna-resultado"><div class="resultado" id="lb-resultado"></div><div id="lb-comparar"></div><div id="lb-caratula"></div><div id="lb-guardas"></div><div id="lb-cotizacion"></div></div>
     </div>`;
   conectarArchivo("lb-archivo", (a) => { analizarArchivo(t, a, true); t.roles = t.info ? rolesIniciales(t.info) : []; vistaLibro(main); });
   conectarPaginasLibro(main, t);
   $("#lb-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaLibro(main); });
   conectarCorrecciones(main, () => vistaLibro(main));
+  conectarSelectorPapel("lb", o, (redibujar) => { t.cara = 0; if (redibujar) vistaLibro(main); else calcularLibro(); });
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file" || el.dataset.correccion || el.dataset.rol) return;
+    if (el.type === "file" || el.dataset.correccion || el.dataset.rol || /papel-tam|pliego-(ancho|alto)/.test(el.id)) return;
     const antes = { rebase: o.rebase, maquina: estado.preferencias.maquina };
     o.cuadernillos = $("#lb-cuadernillos").value.trim();
     $("#lb-cuadernillos").nextElementSibling.textContent = textoCuadernillos(t);
@@ -1267,6 +1421,7 @@ function peticionLibro(maquina, info) {
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
     derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: o.aprovechamiento || "auto",
     volteo: !o.volteo || o.volteo === "maquina" ? null : o.volteo,
+    pliego: pliegoDe(o, maquina),
     titulo: base(estado.libro.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
   };
 }
@@ -1323,6 +1478,7 @@ function calcularLibro() {
     ${listaAvisos(t.plan?.avisos)}
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver las firmas" : "Sube el interior para ver las firmas", true)}`;
   pintarCotizacion("libro");
+  pintarCompararLibro();
   pintarCaratula();
   pintarGuardas();
   const carasLb = t.plan?.plan?.caras;

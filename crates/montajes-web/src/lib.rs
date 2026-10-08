@@ -110,8 +110,19 @@ pub fn analizar(pdf: &[u8]) -> R<String> {
 }
 
 fn pliego(m: &Maquina, pedido: Option<Tamano>) -> R<Tamano> {
-    let p = pedido.unwrap_or(m.pliego_max);
-    if p.ancho > m.pliego_max.ancho + 0.01 || p.alto > m.pliego_max.alto + 0.01 {
+    let mut p = pedido.unwrap_or(m.pliego_max);
+    let cabe = |t: Tamano| t.ancho <= m.pliego_max.ancho + 0.01 && t.alto <= m.pliego_max.alto + 0.01;
+    // Un papel pedido al revés de como entra en la máquina se gira.
+    if !cabe(p) && cabe(p.girado()) {
+        p = p.girado();
+    }
+    if let Some(min) = m.pliego_min
+        && (p.ancho.max(p.alto) < min.ancho.max(min.alto) - 0.01
+            || p.ancho.min(p.alto) < min.ancho.min(min.alto) - 0.01)
+    {
+        return Err(error(format!("el pliego {p} es menor que el mínimo de «{}» ({min})", m.nombre)));
+    }
+    if !cabe(p) {
         return Err(error(format!("el pliego {p} excede el máximo de «{}» ({})", m.nombre, m.pliego_max)));
     }
     Ok(p)
