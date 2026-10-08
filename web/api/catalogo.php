@@ -1,40 +1,35 @@
 <?php
-// Catálogos del taller (máquinas y papeles) guardados en el servidor.
+// Catálogos de la empresa (máquinas y papeles) guardados en el servidor.
 //
-// Cada taller se identifica con un código secreto que se crea en la app. El
-// archivo se guarda fuera de public_html, con el nombre del hash del código,
-// y se conservan las últimas versiones como respaldo.
+// Cada empresa tiene el suyo (según la sesión). Se guarda fuera de
+// public_html y se conservan las últimas versiones como respaldo.
 //
-//   GET  api/catalogo.php            (cabecera X-Taller: código)  → catálogo
-//   POST api/catalogo.php            (cabecera X-Taller, cuerpo JSON) → guarda
+//   GET  api/catalogo.php                 → catálogo
+//   POST api/catalogo.php  (cuerpo JSON)  → guarda
 
 declare(strict_types=1);
-
-header('Content-Type: application/json; charset=utf-8');
-header('Cache-Control: no-store');
-header('X-Content-Type-Options: nosniff');
 
 const MAX_BYTES = 2_000_000;
 const RESPALDOS = 30;
 
-function responder(int $estado, array $datos): void {
-    http_response_code($estado);
-    echo json_encode($datos, JSON_UNESCAPED_UNICODE);
-    exit;
+require __DIR__ . '/lib/base.php';
+
+// El catálogo es de la empresa de la sesión, y solo con la suscripción al día.
+$sesion = exigir_sesion();
+if (!$sesion['suscripcion']['puede_usar']) {
+    responder(402, ['error' => 'la suscripción no está al día', 'codigo' => 'vencida']);
 }
 
-$codigo = $_SERVER['HTTP_X_TALLER'] ?? '';
-if (!preg_match('/^[A-Za-z0-9-]{16,64}$/', $codigo)) {
-    responder(400, ['error' => 'código de taller inválido']);
-}
-
-// domains/<sitio>/datos-montajes: fuera de public_html, no se publica ni se borra al desplegar.
-$carpeta = dirname(__DIR__, 2) . '/datos-montajes';
-if (!is_dir($carpeta) && !mkdir($carpeta, 0700, true) && !is_dir($carpeta)) {
-    responder(500, ['error' => 'no se pudo crear la carpeta de datos']);
-}
-$id = hash('sha256', 'montajes:' . $codigo);
+$carpeta = carpeta_datos();
+$id = hash('sha256', 'macula-empresa:' . $sesion['empresa']['id']);
 $archivo = "$carpeta/$id.json";
+
+// Migración: el catálogo guardado antes con el código del taller pasa a la empresa.
+$codigo = $_SERVER['HTTP_X_TALLER'] ?? '';
+if (!is_file($archivo) && preg_match('/^[A-Za-z0-9-]{16,64}$/', $codigo)) {
+    $viejo = "$carpeta/" . hash('sha256', 'montajes:' . $codigo) . '.json';
+    if (is_file($viejo)) copy($viejo, $archivo);
+}
 
 $metodo = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
@@ -43,11 +38,14 @@ if ($metodo === 'GET') {
         responder(200, ['nuevo' => true]);
     }
     $contenido = file_get_contents($archivo);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
     echo $contenido === false ? '{}' : $contenido;
     exit;
 }
 
 if ($metodo === 'POST') {
+    if (($_SERVER['HTTP_X_MACULA'] ?? '') !== '1') responder(400, ['error' => 'petición inválida']);
     $cuerpo = file_get_contents('php://input', false, null, 0, MAX_BYTES + 1);
     if ($cuerpo === false || strlen($cuerpo) > MAX_BYTES) {
         responder(413, ['error' => 'el catálogo es demasiado grande']);

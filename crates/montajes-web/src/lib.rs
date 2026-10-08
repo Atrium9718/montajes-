@@ -18,6 +18,8 @@ use montajes_core::{Error, libro};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+mod licencia;
+
 type R<T> = Result<T, JsError>;
 
 fn error(e: impl std::fmt::Display) -> JsError {
@@ -42,6 +44,13 @@ impl Resultado {
     pub fn informe(&self) -> String {
         self.informe.clone()
     }
+}
+
+/// Activa la licencia firmada por el servidor; devuelve sus datos.
+#[wasm_bindgen]
+pub fn activar_licencia(token: &str) -> R<String> {
+    let l = licencia::activar(token).map_err(|e| JsError::new(&e))?;
+    serde_json::to_string(&l).map_err(error)
 }
 
 #[wasm_bindgen]
@@ -77,6 +86,7 @@ struct InfoPdf {
 /// Formato, rebase y giro de cada página.
 #[wasm_bindgen]
 pub fn analizar(pdf: &[u8]) -> R<String> {
+    licencia::exigir()?;
     let f = Fuente::desde_bytes(pdf).map_err(error)?;
     let paginas = f
         .paginas
@@ -142,6 +152,7 @@ fn escribir(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> R<(Vec
 /// Cotiza un trabajo (papel con mácula, planchas, impresión, acabados).
 #[wasm_bindgen]
 pub fn cotizar(peticion: &str) -> R<String> {
+    licencia::exigir()?;
     let p: cotizacion::ParametrosCotizacion = serde_json::from_str(peticion).map_err(error)?;
     serde_json::to_string(&cotizacion::cotizar(&p).map_err(error)?).map_err(error)
 }
@@ -149,6 +160,7 @@ pub fn cotizar(peticion: &str) -> R<String> {
 /// Código de barras EAN-13 de un ISBN (barras en mm) para dibujarlo en la portada.
 #[wasm_bindgen]
 pub fn codigo_isbn(isbn: &str, escala: f64) -> R<String> {
+    licencia::exigir()?;
     serde_json::to_string(&montajes_core::codigo_barras::isbn(isbn, escala, 0.0).map_err(error)?).map_err(error)
 }
 
@@ -156,6 +168,7 @@ pub fn codigo_isbn(isbn: &str, escala: f64) -> R<String> {
 /// (páginas compuestas con el rebase dentro de la MediaBox).
 #[wasm_bindgen]
 pub fn fijar_cajas(pdf: &[u8], rebase_mm: f64) -> R<Vec<u8>> {
+    licencia::exigir()?;
     pdf::fijar_cajas(pdf, rebase_mm).map_err(error)
 }
 
@@ -180,6 +193,7 @@ struct PeticionPreflight {
 /// Revisión del PDF antes de imprimir.
 #[wasm_bindgen]
 pub fn revisar_pdf(pdf: &[u8], peticion: &str) -> R<String> {
+    licencia::exigir()?;
     let p: PeticionPreflight = serde_json::from_str(peticion).map_err(error)?;
     let f = Fuente::desde_bytes(pdf).map_err(error)?;
     let base = OpcionesPreflight::default();
@@ -278,6 +292,7 @@ fn plan_nup(p: &PeticionNup) -> R<(ParametrosNup, Distribucion, Vec<Cara>)> {
 
 #[wasm_bindgen]
 pub fn planear_nup(peticion: &str) -> R<String> {
+    licencia::exigir()?;
     let p: PeticionNup = serde_json::from_str(peticion).map_err(error)?;
     let (par, d, caras) = plan_nup(&p)?;
     let avisos = caras.iter().flat_map(|c| c.marcas.avisos.clone()).collect();
@@ -287,6 +302,7 @@ pub fn planear_nup(peticion: &str) -> R<String> {
 
 #[wasm_bindgen]
 pub fn generar_nup(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    licencia::exigir()?;
     let mut p: PeticionNup = serde_json::from_str(peticion).map_err(error)?;
     let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
     let (formato, mut avisos) = fuente.formato_comun(Some(p.formato), p.rebase).map_err(error)?;
@@ -307,6 +323,7 @@ pub fn generar_nup(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
 /// Junta varios PDF en uno (en orden) y devuelve sus bytes.
 #[wasm_bindgen]
 pub fn unir_pdfs(archivos: js_sys::Array) -> R<Vec<u8>> {
+    licencia::exigir()?;
     let contenidos: Vec<Vec<u8>> = archivos.iter().map(|a| js_sys::Uint8Array::new(&a).to_vec()).collect();
     let docs = contenidos.iter().map(|b| lopdf::Document::load_mem(b)).collect::<Result<Vec<_>, _>>().map_err(error)?;
     let mut doc = pdf::unir_documentos(docs).map_err(error)?;
@@ -346,6 +363,7 @@ fn plan_combinado(p: &PeticionCombinado) -> R<(ParametrosNup, Distribucion, Plan
 
 #[wasm_bindgen]
 pub fn planear_combinado(peticion: &str) -> R<String> {
+    licencia::exigir()?;
     let p: PeticionCombinado = serde_json::from_str(peticion).map_err(error)?;
     let (par, d, plan) = plan_combinado(&p)?;
     let avisos = plan.caras.iter().flat_map(|c| c.marcas.avisos.clone()).collect();
@@ -355,6 +373,7 @@ pub fn planear_combinado(peticion: &str) -> R<String> {
 
 #[wasm_bindgen]
 pub fn generar_combinado(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    licencia::exigir()?;
     let mut p: PeticionCombinado = serde_json::from_str(peticion).map_err(error)?;
     let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
     let (formato, mut avisos) = fuente.formato_comun(Some(p.nup.formato), p.nup.rebase).map_err(error)?;
@@ -447,6 +466,7 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
 
 #[wasm_bindgen]
 pub fn planear_libro(peticion: &str) -> R<String> {
+    licencia::exigir()?;
     let p: PeticionLibro = serde_json::from_str(peticion).map_err(error)?;
     let (par, plan, lomo) = plan_libro(&p)?;
     let mut avisos = plan.avisos.clone();
@@ -456,6 +476,7 @@ pub fn planear_libro(peticion: &str) -> R<String> {
 
 #[wasm_bindgen]
 pub fn generar_libro(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    licencia::exigir()?;
     let mut p: PeticionLibro = serde_json::from_str(peticion).map_err(error)?;
     let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
     let tripa: Vec<usize> = if p.mapa.is_empty() { (0..fuente.paginas.len()).collect() } else { p.mapa.clone() };
@@ -535,12 +556,14 @@ fn calcular_portada(p: &PeticionPortada) -> R<Portada> {
 
 #[wasm_bindgen]
 pub fn calcular_portada_json(peticion: &str) -> R<String> {
+    licencia::exigir()?;
     let p: PeticionPortada = serde_json::from_str(peticion).map_err(error)?;
     serde_json::to_string(&calcular_portada(&p)?).map_err(error)
 }
 
 #[wasm_bindgen]
 pub fn plantilla_portada(peticion: &str) -> R<Resultado> {
+    licencia::exigir()?;
     let p: PeticionPortada = serde_json::from_str(peticion).map_err(error)?;
     let c = calcular_portada(&p)?;
     let titulo = format!(
@@ -550,7 +573,7 @@ pub fn plantilla_portada(peticion: &str) -> R<Resultado> {
         pdf::mm_es(c.lomo)
     );
     let nota =
-        format!("{} · rebase {} mm", if p.titulo.is_empty() { "Montajes" } else { &p.titulo }, pdf::mm_es(c.rebase));
+        format!("{} · rebase {} mm", if p.titulo.is_empty() { "Macula" } else { &p.titulo }, pdf::mm_es(c.rebase));
     let codigo = match p.isbn.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         Some(t) => Some(montajes_core::codigo_barras::isbn(t, 1.0, 0.0).map_err(error)?),
         None => None,
@@ -563,6 +586,7 @@ pub fn plantilla_portada(peticion: &str) -> R<Resultado> {
 
 #[wasm_bindgen]
 pub fn armar_portada(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    licencia::exigir()?;
     let p: PeticionPortada = serde_json::from_str(peticion).map_err(error)?;
     let c = calcular_portada(&p)?;
     let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
@@ -657,6 +681,7 @@ struct InformeCaratula<'a> {
 /// reflejado: visto desde adentro, la segunda de forros queda a la izquierda.
 #[wasm_bindgen]
 pub fn generar_caratula(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    licencia::exigir()?;
     let p: PeticionCaratula = serde_json::from_str(peticion).map_err(error)?;
     let pp = &p.portada;
     let exterior = calcular_portada(pp)?;
@@ -792,6 +817,7 @@ pub fn generar_caratula(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> 
 /// Lomo de un libro al lomo (para el asistente rápido).
 #[wasm_bindgen]
 pub fn calcular_lomo(paginas: u32, calibre_um: f64, calibre_portada_um: f64) -> R<f64> {
+    licencia::exigir()?;
     let papel = |c: f64| montajes_core::catalogo::Papel {
         id: "p".into(),
         nombre: String::new(),

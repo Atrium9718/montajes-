@@ -46,6 +46,32 @@ export class Resultado {
 if (Symbol.dispose) Resultado.prototype[Symbol.dispose] = Resultado.prototype.free;
 
 /**
+ * Activa la licencia firmada por el servidor; devuelve sus datos.
+ * @param {string} token
+ * @returns {string}
+ */
+export function activar_licencia(token) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(token, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.activar_licencia(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * Formato, rebase y giro de cada página.
  * @param {Uint8Array} pdf
  * @returns {string}
@@ -117,6 +143,33 @@ export function calcular_portada_json(peticion) {
         const ptr0 = passStringToWasm0(peticion, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.calcular_portada_json(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Código de barras EAN-13 de un ISBN (barras en mm) para dibujarlo en la portada.
+ * @param {string} isbn
+ * @param {number} escala
+ * @returns {string}
+ */
+export function codigo_isbn(isbn, escala) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(isbn, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.codigo_isbn(ptr0, len0, escala);
         var ptr2 = ret[0];
         var len2 = ret[1];
         if (ret[3]) {
@@ -462,6 +515,10 @@ function __wbg_get_imports() {
         },
         __wbg_new_1dbf7428bba60a42: function(arg0) {
             const ret = new Uint8Array(arg0);
+            return ret;
+        },
+        __wbg_now_aa4ccb83129e9e55: function() {
+            const ret = Date.now();
             return ret;
         },
         __wbg_prototypesetcall_bc27214492979395: function(arg0, arg1, arg2) {

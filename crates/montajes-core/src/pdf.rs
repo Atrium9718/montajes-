@@ -515,7 +515,7 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
 
     let mut info = dictionary! {
         "Title" => Object::string_literal(opciones.titulo.clone()),
-        "Creator" => Object::string_literal("Montajes"),
+        "Creator" => Object::string_literal("Macula"),
         "Producer" => Object::string_literal(concat!("montajes-core ", env!("CARGO_PKG_VERSION"))),
         "CreationDate" => Object::string_literal(ahora.pdf()),
         "ModDate" => Object::string_literal(ahora.pdf()),
@@ -763,7 +763,7 @@ pub fn documento_plantilla_portada(c: &Portada, titulo: &str, nota: &str, isbn: 
     });
     let info = doc.add_object(dictionary! {
         "Title" => Object::string_literal(titulo),
-        "Creator" => Object::string_literal("Montajes"),
+        "Creator" => Object::string_literal("Macula"),
     });
     doc.trailer.set("Root", catalogo);
     doc.trailer.set("Info", info);
@@ -1027,7 +1027,7 @@ fn xmp(titulo: &str, fecha: &Fecha, pdfx: Option<&str>, id: &str) -> String {
     xmlns:pdfxid="http://www.npes.org/pdfx/ns/id/">
    <dc:format>application/pdf</dc:format>
    <dc:title><rdf:Alt><rdf:li xml:lang="x-default">{titulo}</rdf:li></rdf:Alt></dc:title>
-   <xmp:CreatorTool>Montajes</xmp:CreatorTool>
+   <xmp:CreatorTool>Macula</xmp:CreatorTool>
    <xmp:CreateDate>{fecha}</xmp:CreateDate>
    <xmp:ModifyDate>{fecha}</xmp:ModifyDate>
    <xmp:MetadataDate>{fecha}</xmp:MetadataDate>

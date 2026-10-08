@@ -1,10 +1,11 @@
-// Montajes · interfaz web. El motor (Rust → WebAssembly) hace todo el cálculo
+// Macula · interfaz web. El motor (Rust → WebAssembly) hace todo el cálculo
 // y escribe los PDF; aquí solo se piden datos, se dibuja la vista previa y se
 // guardan los catálogos en el navegador.
 
 import iniciarMotor, * as motor from "./motor/montajes_web.js";
 import { aMaquina, buscarMaquinas } from "./maquinas-catalogo.js";
 import { vistaDiagramacion } from "./diagramacion.js";
+import { api, vistaAdmin, vistaCuenta } from "./cuenta.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -132,28 +133,21 @@ function unirListas(local, remota, borrados) {
   return [...porId.values()].filter((x) => !(borrados[x.id] > (x.modificado || 0)));
 }
 
+// Código del taller de antes de las cuentas: solo se envía para migrar su catálogo.
 const codigoTaller = () => almacen.leer("codigoTaller", "");
-function nuevoCodigoTaller() {
-  const letras = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const bytes = crypto.getRandomValues(new Uint8Array(20));
-  const s = [...bytes].map((b) => letras[b % letras.length]).join("");
-  return s.match(/.{4}/g).join("-");
-}
+const cabecerasNube = (extra = {}) => ({ "X-Macula": "1", ...(codigoTaller() ? { "X-Taller": codigoTaller() } : {}), ...extra });
 
 let temporizadorNube;
 function programarSincronizacion() {
-  if (!codigoTaller()) return;
   clearTimeout(temporizadorNube);
   temporizadorNube = setTimeout(sincronizar, 700);
 }
 
 async function sincronizar() {
-  const codigo = codigoTaller();
-  if (!codigo) return;
   estado.nube = { ...estado.nube, estado: "sincronizando" };
   pintarNube();
   try {
-    const r = await fetch("api/catalogo.php", { headers: { "X-Taller": codigo }, cache: "no-store" });
+    const r = await fetch("api/catalogo.php", { headers: cabecerasNube(), cache: "no-store" });
     if (!r.ok) throw new Error(`servidor ${r.status}`);
     const remoto = await r.json();
     const borrados = { maquinas: { ...(remoto.borrados?.maquinas || {}), ...estado.borrados.maquinas }, papeles: { ...(remoto.borrados?.papeles || {}), ...estado.borrados.papeles } };
@@ -168,7 +162,7 @@ async function sincronizar() {
     if (igual) { estado.nube = { estado: "ok", cuando: Date.now() }; pintarNube(); return; }
     const g = await fetch("api/catalogo.php", {
       method: "POST",
-      headers: { "X-Taller": codigo, "Content-Type": "application/json" },
+      headers: cabecerasNube({ "Content-Type": "application/json" }),
       body: JSON.stringify({ maquinas: estado.maquinas, papeles: estado.papeles, borrados }),
     });
     if (!g.ok) throw new Error(`servidor ${g.status}`);
@@ -187,11 +181,10 @@ async function sincronizar() {
 
 function textoNube() {
   const n = estado.nube;
-  if (!codigoTaller()) return "";
   if (n.estado === "sincronizando") return "Sincronizando…";
   if (n.estado === "error") return "Sin conexión con la nube: se guardó en este equipo y se sincroniza al volver.";
-  if (n.estado === "ok") return `Guardado en la nube del taller · ${new Date(n.cuando).toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" })}`;
-  return "Nube del taller conectada";
+  if (n.estado === "ok") return `Guardado en la nube de la empresa · ${new Date(n.cuando).toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" })}`;
+  return "Nube de la empresa conectada";
 }
 function pintarNube() {
   const el = $("#nube-estado");
@@ -202,51 +195,13 @@ function pintarNube() {
 }
 
 function bloqueNube() {
-  const codigo = codigoTaller();
-  if (codigo) {
-    return `<section class="tarjeta nube">
-      <div class="nube-cabeza"><span class="orbe" aria-hidden="true"></span><div><h3>Nube del taller</h3><p id="nube-estado" class="tenue" data-estado="${estado.nube.estado}">${esc(textoNube())}</p></div></div>
-      <div class="nube-codigo"><span class="tenue">Código del taller</span><code>${esc(codigo)}</code>
-        <button class="boton boton-claro boton-chico" type="button" id="nube-copiar">Copiar</button>
-        <button class="boton boton-claro boton-chico" type="button" id="nube-salir">Desconectar este equipo</button></div>
-      <small class="tenue">Escribe este código en cada computador o celular del taller para ver las mismas máquinas y papeles. Guárdalo en un lugar seguro: quien lo tenga puede ver y editar los catálogos.</small>
-    </section>`;
-  }
-  return `<section class="tarjeta nube nube-apagada">
-    <div class="nube-cabeza"><span class="orbe" aria-hidden="true"></span><div><h3>Guarda tus catálogos en la nube del taller</h3><p class="tenue">Ahora solo están en este navegador: si cambias de equipo o se borran los datos del navegador, se pierden. Con la nube quedan en tu servidor y en todos los equipos del taller.</p></div></div>
-    <div class="acciones-resultado">
-      <button class="boton boton-naranja" type="button" id="nube-crear">Crear código del taller</button>
-      <form id="nube-unir" class="nube-unir"><input type="text" name="codigo" placeholder="Ya tengo un código: XXXX-XXXX-…" autocomplete="off" aria-label="Código del taller"><button class="boton boton-claro">Conectar</button></form>
-    </div>
+  return `<section class="tarjeta nube">
+    <div class="nube-cabeza"><span class="orbe" aria-hidden="true"></span><div><h3>Nube de ${esc(estado.cuenta?.empresa?.nombre || "la empresa")}</h3><p id="nube-estado" class="tenue" data-estado="${estado.nube.estado}">${esc(textoNube())}</p></div></div>
+    <small class="tenue">Las máquinas y papeles se guardan en la cuenta de la empresa y los ven todos sus usuarios, en cualquier equipo.</small>
   </section>`;
 }
 
-function conectarNube(main) {
-  $("#nube-crear")?.addEventListener("click", async () => {
-    almacen.guardar("codigoTaller", nuevoCodigoTaller());
-    await sincronizar();
-    avisar("Catálogos guardados en la nube del taller");
-    vistaCatalogos(main);
-  });
-  $("#nube-unir")?.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const codigo = String(new FormData(e.target).get("codigo") || "").trim().toUpperCase();
-    if (!/^[A-Z0-9-]{16,64}$/.test(codigo)) { avisar("Ese código no es válido"); return; }
-    almacen.guardar("codigoTaller", codigo);
-    await sincronizar();
-    avisar(estado.nube.estado === "ok" ? "Equipo conectado a la nube del taller" : "No se pudo conectar; se reintentará");
-    vistaCatalogos(main);
-  });
-  $("#nube-copiar")?.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(codigoTaller()); avisar("Código copiado"); } catch { avisar(codigoTaller()); }
-  });
-  $("#nube-salir")?.addEventListener("click", () => {
-    if (!confirm("¿Desconectar este equipo de la nube? Los catálogos quedan en el servidor y en este navegador.")) return;
-    almacen.guardar("codigoTaller", "");
-    estado.nube = { estado: "apagada", cuando: 0 };
-    vistaCatalogos(main);
-  });
-}
+function conectarNube() {}
 function preferir(clave, valor) { estado.preferencias[clave] = valor; almacen.guardar("preferencias", estado.preferencias); }
 
 let temporizadorAviso;
@@ -280,7 +235,11 @@ const formas = {
 };
 
 // ───────────── Navegación ─────────────
-const vistas = { inicio: vistaInicio, piezas: vistaPiezas, diagramar: (main) => vistaDiagramacion(main, ayudasDiagramacion()), libro: vistaLibro, portada: vistaPortada, catalogos: vistaCatalogos };
+const vistas = { cuenta: (main) => vistaCuenta(main, ayudasCuenta()), admin: (main) => vistaAdmin(main, ayudasCuenta()), inicio: vistaInicio, piezas: vistaPiezas, diagramar: (main) => vistaDiagramacion(main, ayudasDiagramacion()), libro: vistaLibro, portada: vistaPortada, catalogos: vistaCatalogos };
+
+function ayudasCuenta() {
+  return { esc, chips, avisar, estado, refrescarCuenta };
+}
 
 // Lo que la diagramación usa de la app (sin acoplarla al resto de vistas).
 function ayudasDiagramacion() {
@@ -346,7 +305,7 @@ function vistaInicio(main) {
         <div class="cifra"><b class="num">${estado.papeles.length}</b><span>papeles</span></div>
       </div>
       <div>
-        <p style="max-width:440px">${estado.maquinas.length ? codigoTaller() ? "Tus máquinas y papeles están en la nube del taller y se comparten entre tus equipos." : "Tus máquinas y papeles están solo en este navegador. Actívalos en la nube del taller desde Catálogos para no perderlos." : "Empieza creando las máquinas del taller: tamaño de pliego, pinza y márgenes. Se guardan para siempre."}</p>
+        <p style="max-width:440px">${estado.maquinas.length ? "Tus máquinas y papeles están en la nube de la empresa y los ven todos sus usuarios." : "Empieza creando las máquinas del taller: tamaño de pliego, pinza y márgenes. Se guardan para siempre."}</p>
         <a class="boton ${estado.maquinas.length ? "boton-claro" : "boton-naranja"}" style="margin-top:14px" href="#catalogos">${estado.maquinas.length ? "Ver catálogos" : "Crear mi primera máquina"}</a>
       </div>
     </section>`;
@@ -1364,7 +1323,7 @@ function peticionPortada() {
     paginas: o.paginas, calibre_um: tripa?.calibre_um ?? null, calibre_portada_um: cubierta?.calibre_um ?? null,
     tipo: o.tipo === "rustica" ? { rustica: { solapa: o.solapa } } : { tapa_dura: { carton: o.carton, escuadra: o.escuadra, vuelta: o.vuelta, bisagra: o.bisagra } },
     rebase: o.rebase, derecha_a_izquierda: o.rtl, marcas: true, orden: o.orden,
-    titulo: tripa ? `${o.paginas} pp en ${tripa.nombre}` : "Montajes", fecha: ahora(),
+    titulo: tripa ? `${o.paginas} pp en ${tripa.nombre}` : "Macula", fecha: ahora(),
   };
 }
 
@@ -1742,6 +1701,56 @@ function dialogoPapel(p, main) {
 }
 
 // ───────────── Arranque ─────────────
+// ───────────── Sesión, suscripción y licencia ─────────────
+// La app solo llega a cuentas al día (puerta.php); además el motor exige una
+// licencia firmada por el servidor, vigente hasta 3 días sin conexión.
+async function refrescarCuenta() {
+  const yo = await api("cuenta.php?accion=yo");
+  if (!yo.sesion) { location.href = "/acceso.html"; return null; }
+  if (!yo.suscripcion.puede_usar) { location.href = "/acceso.html#pagar"; return null; }
+  estado.cuenta = yo;
+  if (yo.licencia) {
+    motor.activar_licencia(yo.licencia);
+    almacen.guardar("licencia", yo.licencia);
+  }
+  pintarCuenta();
+  return yo;
+}
+
+async function activarSesion() {
+  try {
+    return await refrescarCuenta();
+  } catch (e) {
+    // Sin conexión: vale la última licencia mientras siga vigente.
+    const guardada = almacen.leer("licencia", "");
+    try { if (guardada) { motor.activar_licencia(guardada); return { sinConexion: true }; } } catch { /* vencida */ }
+    throw new Error("No hay conexión con Macula y la licencia de este equipo venció. Conéctate a internet para seguir.");
+  }
+}
+
+function pintarCuenta() {
+  const c = estado.cuenta;
+  const boton = $("#cuenta-boton");
+  if (boton && c) {
+    boton.hidden = false;
+    boton.querySelector("span").textContent = c.empresa.nombre;
+  }
+  const franja = $("#franja-cuenta");
+  if (!franja || !c) return;
+  const s = c.suscripcion;
+  const dias = Math.max(0, Math.ceil((s.acceso_hasta - Date.now() / 1000) / 86400));
+  const mostrar = s.estado === "prueba" || s.estado === "gracia" || (s.estado === "activa" && dias <= 5 && !(c.empresa.tarjeta && c.empresa.renovar));
+  franja.hidden = !mostrar;
+  if (mostrar) {
+    franja.dataset.tono = s.estado === "gracia" ? "error" : "aviso";
+    franja.innerHTML = s.estado === "prueba"
+      ? `Prueba gratis: te ${dias === 1 ? "queda 1 día" : `quedan ${dias} días`}. <a href="#cuenta">Elegir plan y pagar</a>`
+      : s.estado === "gracia"
+        ? `No pudimos cobrar la suscripción. En ${dias} ${dias === 1 ? "día" : "días"} la cuenta se bloquea. <a href="#cuenta">Pagar ahora</a>`
+        : `Tu suscripción vence en ${dias} ${dias === 1 ? "día" : "días"}. <a href="#cuenta">Renovar</a>`;
+  }
+}
+
 async function arrancar() {
   try {
     await iniciarMotor();
@@ -1750,13 +1759,23 @@ async function arrancar() {
     $("#vista").innerHTML = `<div class="error-caja">No se pudo cargar el motor de imposición en este navegador (${esc(e.message || e)}). Usa una versión reciente de Chrome, Edge, Firefox o Safari.</div>`;
     return;
   }
+  try {
+    if (!(await activarSesion())) return;
+  } catch (e) {
+    $("#vista").innerHTML = `<div class="error-caja">${esc(e.message)}</div>`;
+    return;
+  }
   window.addEventListener("hashchange", navegar);
   navegar();
   // Pide al navegador no borrar estos datos cuando le falte espacio.
   navigator.storage?.persist?.().catch(() => {});
-  if (codigoTaller()) {
+  sincronizar();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
     sincronizar();
-    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") sincronizar(); });
-  }
+    refrescarCuenta().catch(() => {});
+  });
+  // La licencia dura 3 días: se renueva cada 6 horas mientras la app esté abierta.
+  setInterval(() => refrescarCuenta().catch(() => {}), 6 * 3600 * 1000);
 }
 arrancar();

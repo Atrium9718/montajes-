@@ -1,22 +1,36 @@
-# Montajes: sitio estático con el motor en WebAssembly.
+# Macula: la app solo se entrega a cuentas al día (puerta.php).
 AddType application/wasm .wasm
 AddType text/javascript .js .mjs
+Options -Indexes
+DirectoryIndex puerta.php
 
 <IfModule mod_deflate.c>
   AddOutputFilterByType DEFLATE text/html text/css text/javascript application/javascript application/wasm application/json
 </IfModule>
 
 <IfModule mod_headers.c>
-  # El motor y los estilos cambian con cada versión: que el navegador revalide.
-  <FilesMatch "\.(wasm|js|css|html)$">
-    Header set Cache-Control "no-cache"
-  </FilesMatch>
   Header always set X-Content-Type-Options "nosniff"
   Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  <FilesMatch "\.(js|css|html)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
 </IfModule>
 
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteCond %{HTTPS} off
   RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+  # Nada de lo interno se sirve: librerías del servidor, zips y archivos ocultos.
+  RewriteRule ^api/lib/ - [F,L]
+  RewriteRule (^|/)\. - [F,L]
+  RewriteRule \.zip$ - [F,L]
+
+  # Públicos: API (cada punto valida la sesión), página de acceso y estilos.
+  RewriteRule ^api/[a-z]+\.php$ - [L]
+  RewriteRule ^(acceso\.html|acceso\.js|estilos\.css|marca\.svg|puerta\.php)$ - [L]
+
+  # Todo lo demás (la app y el motor) pasa por la puerta.
+  RewriteRule ^ puerta.php [L]
 </IfModule>

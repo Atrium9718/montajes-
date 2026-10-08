@@ -1,6 +1,6 @@
-# montajes-
+# Macula
 
-Software de imposición automática para imprenta: volantes, tarjetas, plantas offset, revistas y libros (caballete, al lomo, cosido, tapa dura). Entrega el PDF listo para imprimir (PDF/X).
+**Macula** (repositorio `montajes-`) es software de imposición automática para imprenta, vendido como servicio por suscripción: volantes, tarjetas, plantas offset, revistas y libros (caballete, al lomo, cosido, tapa dura). Entrega el PDF listo para imprimir (PDF/X).
 
 - Planeación completa: [docs/PLANEACION.md](docs/PLANEACION.md)
 - Motor: `crates/montajes-core` (Rust). Línea de comandos: `crates/montajes-cli`.
@@ -47,6 +47,13 @@ montajes portada plantilla --formato 148x210 --paginas 240 --papel bond75 --tapa
 # 6. Lomo de un libro
 montajes lomo --paginas 240 --papel bond75 --portada brillante300 --tolerancia 0.5
 ```
+
+## Cuentas y cobro
+
+- La app solo se entrega a cuentas al día (`web/puerta.php` + `.htaccess`); el motor exige una licencia firmada por el servidor.
+- API en PHP (`web/api/`): `cuenta.php` (registro, ingreso, usuarios), `pagos.php` (Wompi), `wompi.php` (webhook), `admin.php` (panel), `cron.php`.
+- Datos en SQLite y llaves en `datos-montajes/` (fuera de `public_html`); las llaves de Wompi se pegan en el panel de Macula, nunca en el repositorio.
+- Pruebas locales: `MACULA_DATOS=/tmp/datos MACULA_CORREO_ARCHIVO=/tmp/datos/correos.txt php -S localhost:8772 -t web scripts/servidor-local.php`.
 
 ## Publicación
 

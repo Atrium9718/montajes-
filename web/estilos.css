@@ -365,3 +365,60 @@ textarea:hover { border-color: var(--linea); }
 .pliego-libro .pagina-vacia { background: transparent; box-shadow: none; }
 .pliego-libro .pagina-cargando { background: linear-gradient(90deg, #f3f3ef, #fafaf7, #f3f3ef); }
 .paginador input[type="range"] { width: 140px; accent-color: var(--naranja); }
+
+/* Cuentas y suscripción */
+.barra { gap: 12px; }
+.cuenta-boton {
+  display: inline-flex; align-items: center; gap: 8px; text-decoration: none; color: var(--tinta);
+  font-size: 14px; font-weight: 600; padding: 9px 14px; border-radius: 999px; background: var(--superficie); border: 1px solid var(--linea);
+  max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cuenta-boton::before { content: ""; width: 18px; height: 18px; border-radius: 50%; background: var(--orbe); flex: none; }
+.cuenta-boton span { overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 720px) { .cuenta-boton { max-width: 150px; font-size: 13px; padding: 7px 10px; } }
+.franja-cuenta { margin: 0 auto 8px; max-width: 1240px; padding: 10px 18px; border-radius: 14px; font-size: 14px; background: color-mix(in srgb, var(--naranja) 14%, var(--superficie)); }
+.franja-cuenta[data-tono="error"] { background: color-mix(in srgb, var(--error) 16%, var(--superficie)); }
+.franja-cuenta a { color: inherit; font-weight: 700; }
+@media (max-width: 720px) { .franja-cuenta { margin: 0 16px 8px; } }
+.planes { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.plan {
+  appearance: none; text-align: left; font: inherit; color: var(--tinta); cursor: pointer; display: grid; gap: 6px; align-content: start;
+  padding: 16px; border-radius: 18px; border: 1.5px solid var(--linea); background: var(--superficie);
+}
+.plan b { font-size: 16px; }
+.plan .plan-precio { font-size: 26px; font-weight: 700; letter-spacing: -0.03em; }
+.plan .plan-precio small { font-size: 13px; font-weight: 500; color: var(--gris); }
+.plan .plan-usuarios { font-size: 13px; font-weight: 600; }
+.plan .tenue { font-size: 13px; }
+.plan.elegido { border-color: var(--naranja); box-shadow: 0 0 0 3px color-mix(in srgb, var(--naranja) 20%, transparent); }
+input[type="email"], input[type="password"], input[type="tel"] {
+  width: 100%; font: inherit; font-size: 15px; color: var(--tinta); background: var(--superficie-2);
+  border: 1px solid transparent; border-radius: 12px; padding: 11px 12px;
+}
+input.codigo { font-size: 26px; letter-spacing: 0.4em; text-align: center; font-variant-numeric: tabular-nums; }
+body.acceso main { display: grid; place-items: center; min-height: 70vh; position: relative; }
+.acceso-fondo { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; overflow: hidden; z-index: -1; }
+.acceso-fondo .orbe { width: 520px; height: 520px; filter: blur(90px); opacity: .45; }
+.acceso-tarjeta { width: 100%; max-width: 440px; display: grid; gap: 16px; padding: 32px; }
+.acceso-tarjeta.acceso-ancha { max-width: 760px; }
+.acceso-tarjeta h1 { font-size: clamp(30px, 5vw, 42px); line-height: 1.05; letter-spacing: -0.03em; }
+.acceso-enlaces { font-size: 14px; color: var(--gris); }
+.tabla { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tabla th { text-align: left; font-size: 12px; color: var(--gris); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--linea); }
+.tabla td { padding: 10px 8px; border-bottom: 1px solid var(--linea); vertical-align: top; }
+.tabla td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tabla-desliza { overflow-x: auto; }
+.lista-usuarios { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.lista-usuarios li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 12px; background: var(--superficie-2); }
+.lista-usuarios li div { display: grid; gap: 2px; min-width: 0; }
+.lista-usuarios li span { font-size: 13px; overflow-wrap: anywhere; }
+.lista-usuarios li.inactivo { opacity: .55; }
+.metricas-5 { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+.metricas-5 .metrica b { font-size: clamp(26px, 3.4vw, 40px); }
+.acciones-empresa summary { list-style: none; }
+.acciones-empresa[open] { min-width: 300px; }
+.plan-edicion { padding: 12px; border-radius: 14px; background: var(--superficie-2); display: grid; gap: 10px; }
+.trabajo > * { min-width: 0; }
+.metricas-cuenta { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+.metricas-cuenta .metrica b { font-size: clamp(22px, 2.6vw, 34px); letter-spacing: -0.02em; overflow-wrap: anywhere; }
+#ad-contenido { display: grid; gap: 20px; }
