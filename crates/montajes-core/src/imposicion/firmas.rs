@@ -170,6 +170,57 @@ fn cabe(g: &Grilla, p: &ParametrosLibro) -> Option<bool> {
     }
 }
 
+/// Explica por qué no entra la firma siguiente (el doble de páginas): cuánto
+/// mide con rebase, refile, fresado y marcas frente al área imprimible, y
+/// qué ajuste la haría entrar.
+fn por_que_no_cabe_mas(p: &ParametrosLibro, mayor: u32, paginas_libro: u32) -> Option<String> {
+    let siguiente = mayor * 2;
+    if siguiente > 64 || siguiente > paginas_libro {
+        return None;
+    }
+    let e = Esquema::estandar(siguiente).ok()?;
+    let area = p.margenes.area_imprimible(p.pliego);
+    let necesita = |q: &ParametrosLibro| {
+        let g = grilla(&e, q);
+        let borde = 2.0 * q.marcas.espacio_necesario(q.rebase);
+        let (w, h) = (g.ancho() + borde, g.alto() + borde);
+        // La orientación que menos falta.
+        let normal = (w - area.ancho).max(0.0) + (h - area.alto).max(0.0);
+        let girada = (h - area.ancho).max(0.0) + (w - area.alto).max(0.0);
+        if normal <= girada { (w, h, area.ancho, area.alto) } else { (h, w, area.ancho, area.alto) }
+    };
+    let (w, h, aw, ah) = necesita(p);
+    let cm = |v: f64| format!("{:.1}", v / 10.0).replace('.', ",");
+    let mut texto = format!(
+        "no caben {} páginas por pliego ({} por cara): con rebase, refile{} y marcas se necesitan {} × {} cm y el área imprimible del pliego es {} × {} cm",
+        siguiente,
+        siguiente / 2,
+        if p.encuadernacion == Encuadernacion::Lomo { ", fresado" } else { "" },
+        cm(w),
+        cm(h),
+        cm(aw),
+        cm(ah)
+    );
+    let entra = |q: &ParametrosLibro| {
+        let g = grilla(&e, q);
+        cabe(&g, q).is_some()
+    };
+    let sin_marcas = ParametrosLibro { marcas: OpcionesMarcas::ninguna(), ..p.clone() };
+    let justo = ParametrosLibro { refile: 1.0, rebase: 1.0, fresado: 0.0, ..sin_marcas.clone() };
+    if entra(&sin_marcas) {
+        texto += "; sin marcas de corte sí entrarían";
+    } else if entra(&justo) {
+        texto += "; entrarían sin marcas y con rebase y refile de 1 mm (y sin fresado), muy justo";
+    } else {
+        texto += &format!(
+            "; ni las páginas solas, sin rebase ni márgenes ({} × {} cm), entran en el área imprimible: use un pliego más grande",
+            cm(f64::from(e.columnas) * p.pagina.ancho),
+            cm(f64::from(e.filas) * p.pagina.alto)
+        );
+    }
+    Some(texto)
+}
+
 /// Área imprimible en el pliego «virtual» (orientado como el libro).
 fn area_virtual(p: &ParametrosLibro, girada: bool) -> (f64, f64, Rect) {
     let a = p.margenes.area_imprimible(p.pliego);
@@ -307,6 +358,12 @@ pub fn planificar(p: &ParametrosLibro) -> Resultado<PlanLibro> {
                 Error::NoCabe(format!("ni una firma de 4 páginas de {} cabe en {}", p.pagina, p.pliego))
             })?,
         };
+    if p.firma.is_none()
+        && p.cuadernillos.is_empty()
+        && let Some(aviso) = por_que_no_cabe_mas(p, mayor, paginas_libro)
+    {
+        avisos.push(aviso);
+    }
     let tamanos = if p.cuadernillos.is_empty() { repartir(paginas_libro, mayor) } else { p.cuadernillos.clone() };
     let numeracion = numerar(&tamanos, paginas_libro, p.encuadernacion.anidada());
 
