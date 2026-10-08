@@ -157,9 +157,10 @@ fn pliegos_candidatos(m: &Maquina, pedido: Option<Tamano>, o: OrientacionPapel) 
             buenos.push(pliego(m, Some(t))?);
         }
     }
+    // Si la orientación pedida no entra en la máquina, se usa la que sí entra:
+    // el papel solo puede ir como lo recibe la máquina.
     if buenos.is_empty() {
-        let como = if o == OrientacionPapel::Vertical { "vertical" } else { "horizontal" };
-        return Err(error(format!("el papel {base} no entra {como} en «{}» ({})", m.nombre, m.pliego_max)));
+        return pliegos_candidatos(m, pedido, OrientacionPapel::Auto);
     }
     Ok(buenos)
 }

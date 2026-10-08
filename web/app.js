@@ -636,8 +636,10 @@ function selectorPapel(prefijo, o, maquina, papel) {
       <label class="campo"><span>Alto (mm)</span><input type="number" id="${prefijo}-pliego-alto" value="${o.pliegoAlto ?? ""}"></label>
       <button class="boton boton-claro boton-chico" type="button" id="${prefijo}-guardar-tam" style="align-self:end">Guardar tamaño</button></div>` : ""}
     <small>Solo aparecen los tamaños que caben en ${esc(maquina.nombre)}. Abajo se comparan para ver cuál gasta menos papel.</small>
-    <div class="campo"><span>Papel en la máquina</span>${chips(`${prefijo}-orientacion-papel`, [["auto", "Automático (lo que más rinda)"], ["horizontal", "Horizontal"], ["vertical", "Vertical"]], o.orientacionPapel || "auto")}</div></div>`;
+    ${ambasOrientaciones(pliegoDe(o, maquina) || maquina.pliego_max, maquina) ? `<div class="campo"><span>Papel en la máquina</span>${chips(`${prefijo}-orientacion-papel`, [["auto", "Automático (lo que más rinda)"], ["horizontal", "Horizontal"], ["vertical", "Vertical"]], o.orientacionPapel || "auto")}</div>` : ""}</div>`;
 }
+/** ¿El papel entra en la máquina tanto horizontal como vertical? */
+const ambasOrientaciones = (t, m) => cabeEnMaquina({ ancho: t.ancho, alto: t.alto }, m) && cabeEnMaquina({ ancho: t.alto, alto: t.ancho }, m);
 const orientacionPapel = (o) => o.orientacionPapel || "auto";
 /** «horizontal» o «vertical» según cómo quedó el pliego. */
 const comoPapel = (t) => (t.ancho >= t.alto ? "horizontal" : "vertical");
