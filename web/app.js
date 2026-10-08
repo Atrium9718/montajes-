@@ -11,6 +11,13 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const mm = (v, d = 1) => (Math.round(v * 10 ** d) / 10 ** d).toLocaleString("es-CO", { maximumFractionDigits: d });
+/** Rebase mínimo de imprenta: nunca menos de 3 mm. */
+const REBASE_MINIMO = 3;
+const rebaseMinimo = (v) => {
+  const r = Math.max(REBASE_MINIMO, Number(v) || REBASE_MINIMO);
+  if (Number(v) < REBASE_MINIMO) setTimeout(() => avisar(`El rebase mínimo es de ${REBASE_MINIMO} mm`), 0);
+  return r;
+};
 const num = (v, def = 0) => { const n = parseFloat(String(v).replace(",", ".")); return Number.isFinite(n) ? n : def; };
 const ahora = () => Math.floor(Date.now() / 1000);
 
@@ -71,10 +78,10 @@ const CORRECCIONES = [
   ["sobreimprimir_negro", "Sobreimprimir el negro 100 %", "Evita filetes blancos si el registro se mueve."],
   ["quitar_sobreimpresion_blanco", "Quitar sobreimpresión de blancos", "Si no, los objetos blancos desaparecen al imprimir."],
   ["linea_minima", "Engrosar líneas finas a 0,25 pt", "Las más finas pueden no verse."],
-  ["rebase_espejo", "Rebase en espejo si falta", "Refleja el borde de la página sobre el rebase."],
+  ["rebase_espejo", "Completar el rebase si falta (mínimo 3 mm)", "Si la página trae menos rebase, refleja su borde para llegar a 3 mm."],
 ];
 function correcciones() {
-  const c = { sobreimprimir_negro: true, quitar_sobreimpresion_blanco: true, linea_minima: true, rebase_espejo: false, ...(estado.preferencias.correcciones || {}) };
+  const c = { sobreimprimir_negro: true, quitar_sobreimpresion_blanco: true, linea_minima: true, rebase_espejo: true, ...(estado.preferencias.correcciones || {}) };
   return { ...c, linea_minima: c.linea_minima ? 0.25 : null };
 }
 function bloqueCorrecciones(prefijo) {
@@ -765,7 +772,7 @@ function vistaPiezas(main) {
           <div class="paso-titulo"><span class="paso-num">2</span><h3>Montaje</h3></div>
           ${selectorMaquina("pz-maquina")}
           <div class="fila">
-            <label class="campo"><span>Rebase (mm)</span><input type="number" step="0.5" min="0" id="pz-rebase" value="${o.rebase}"></label>
+            <label class="campo"><span>Rebase (mm)</span><input type="number" step="0.5" min="3" id="pz-rebase" value="${o.rebase}"></label>
             <label class="campo"><span>Calle (mm)</span><input type="number" step="0.5" min="0" id="pz-calle" value="${o.calle}"><small>0 = corte compartido</small></label>
           </div>
           <div class="campo"><span>Orientación</span>${chips("orientacion", [["auto", "Automática"], ["normal", "Normal"], ["girada", "Girada 90°"]], o.orientacion)}</div>
@@ -797,7 +804,7 @@ function vistaPiezas(main) {
   }
   $("#pz-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaPiezas(main); });
   const leerOpciones = () => {
-    o.rebase = num($("#pz-rebase").value, 3);
+    o.rebase = rebaseMinimo(num($("#pz-rebase").value, 3));
     o.calle = num($("#pz-calle").value, 0);
     o.dorso = $("#pz-dorso").checked;
     o.marcas = $("#pz-marcas").checked;
@@ -1383,7 +1390,7 @@ function vistaLibro(main) {
           <details class="avanzado"><summary>Márgenes, lectura y marcas</summary>
             <div class="paso">
               <div class="fila-3">
-                <label class="campo"><span>Rebase</span><input type="number" step="0.5" min="0" id="lb-rebase" value="${o.rebase}"></label>
+                <label class="campo"><span>Rebase</span><input type="number" step="0.5" min="3" id="lb-rebase" value="${o.rebase}"></label>
                 <label class="campo"><span>Refile</span><input type="number" step="0.5" min="0" id="lb-refile" value="${o.refile}"></label>
                 <label class="campo"><span>Fresado</span><input type="number" step="0.5" min="0" id="lb-fresado" value="${o.fresado}" ${o.encuadernacion !== "lomo" ? "disabled" : ""}></label>
               </div>
@@ -1408,7 +1415,7 @@ function vistaLibro(main) {
     const antes = { rebase: o.rebase, maquina: estado.preferencias.maquina };
     o.cuadernillos = $("#lb-cuadernillos").value.trim();
     $("#lb-cuadernillos").nextElementSibling.textContent = textoCuadernillos(t);
-    o.rebase = num($("#lb-rebase").value, 3);
+    o.rebase = rebaseMinimo(num($("#lb-rebase").value, 3));
     o.refile = num($("#lb-refile").value, 3);
     o.fresado = num($("#lb-fresado").value, 3);
     o.creep = $("#lb-creep").checked;
@@ -1563,7 +1570,7 @@ function vistaPortada(main) {
               <label class="campo"><span>Bisagra (mm)</span><input type="number" id="po-bisagra" value="${o.bisagra}"></label>
             </div>`}
           <div class="fila">
-            <label class="campo"><span>Rebase (mm)</span><input type="number" step="0.5" id="po-rebase" value="${o.rebase}"></label>
+            <label class="campo"><span>Rebase (mm)</span><input type="number" step="0.5" min="3" id="po-rebase" value="${o.rebase}"></label>
             <div class="campo" style="align-content:end">${interruptor("po-rtl", "Derecha a izquierda", o.rtl)}</div>
           </div>
         </section>
@@ -1575,7 +1582,7 @@ function vistaPortada(main) {
     o.ancho = num($("#po-ancho").value, 148); o.alto = num($("#po-alto").value, 210);
     o.paginas = Math.max(0, Math.round(num($("#po-paginas").value, 0)));
     o.lomo = $("#po-lomo").value;
-    o.rebase = num($("#po-rebase").value, 3);
+    o.rebase = rebaseMinimo(num($("#po-rebase").value, 3));
     o.rtl = $("#po-rtl").checked;
     if (o.tipo === "rustica") { o.solapa = num($("#po-solapa").value, 0); preferir("papelCubierta", $("#po-cubierta").value); }
     else { o.carton = num($("#po-carton").value, 2.5); o.escuadra = num($("#po-escuadra").value, 3); o.vuelta = num($("#po-vuelta").value, 15); o.bisagra = num($("#po-bisagra").value, 8); }

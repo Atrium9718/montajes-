@@ -164,7 +164,7 @@ export function vistaDiagramacion(main, h) {
     const v = (id) => $(`#dg-${id}`)?.value ?? "";
     const c = (id) => !!$(`#dg-${id}`)?.checked;
     const o = opciones(h);
-    o.ancho = num(v("ancho"), o.ancho); o.alto = num(v("alto"), o.alto); o.rebase = num(v("rebase"), o.rebase);
+    o.ancho = num(v("ancho"), o.ancho); o.alto = num(v("alto"), o.alto); o.rebase = Math.max(3, num(v("rebase"), o.rebase));
     o.margenes = { interior: num(v("m-interior"), 18), exterior: num(v("m-exterior"), 15), superior: num(v("m-superior"), 18), inferior: num(v("m-inferior"), 20) };
     o.fresado = c("fresado");
     o.fuente = v("fuente") || o.fuente;

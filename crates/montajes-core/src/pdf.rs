@@ -21,6 +21,9 @@ use crate::portada::{Portada, TipoPanel};
 use crate::unidades::{mm_a_pt, pt_a_mm};
 use crate::{Error, Resultado};
 
+/// Solape (mm) de las franjas de rebase en espejo bajo la página.
+const SOLAPE: f64 = 0.2;
+
 /// Límite de descompresión por página (protege de PDFs maliciosos).
 const LIMITE_CONTENIDO: usize = 512 * 1024 * 1024;
 
@@ -498,10 +501,12 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                 let [fi, fb, fd, fa] = falta;
                 let [pi, pb, pd, pa] = pide;
                 let franjas: [(bool, Rect, Vec<[f64; 6]>); 8] = [
-                    (fi, Rect::new(r.x, c.y, pi, c.alto), vec![refl_x(x0)]),
-                    (fd, Rect::new(c.derecha(), c.y, pd, c.alto), vec![refl_x(x1)]),
-                    (fb, Rect::new(c.x, r.y, c.ancho, pb), vec![refl_y(y0)]),
-                    (fa, Rect::new(c.x, c.arriba(), c.ancho, pa), vec![refl_y(y1)]),
+                    // Cada franja se mete 0,2 mm bajo la página (que va encima) para
+                    // que no quede un filo blanco por el antialias del visor o del RIP.
+                    (fi, Rect::new(r.x, c.y, pi + SOLAPE, c.alto), vec![refl_x(x0)]),
+                    (fd, Rect::new(c.derecha() - SOLAPE, c.y, pd + SOLAPE, c.alto), vec![refl_x(x1)]),
+                    (fb, Rect::new(c.x, r.y, c.ancho, pb + SOLAPE), vec![refl_y(y0)]),
+                    (fa, Rect::new(c.x, c.arriba() - SOLAPE, c.ancho, pa + SOLAPE), vec![refl_y(y1)]),
                     (fi && fb, Rect::new(r.x, r.y, pi, pb), vec![refl_x(x0), refl_y(y0)]),
                     (fd && fb, Rect::new(c.derecha(), r.y, pd, pb), vec![refl_x(x1), refl_y(y0)]),
                     (fi && fa, Rect::new(r.x, c.arriba(), pi, pa), vec![refl_x(x0), refl_y(y1)]),

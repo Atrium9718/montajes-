@@ -46,7 +46,7 @@ impl Correcciones {
             sobreimprimir_negro: true,
             quitar_sobreimpresion_blanco: true,
             linea_minima: Some(0.25),
-            rebase_espejo: false,
+            rebase_espejo: true,
         }
     }
 
