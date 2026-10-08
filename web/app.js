@@ -1490,6 +1490,9 @@ function calcularLibro() {
       </div>
     </section>` : ""}
     ${listaAvisos(t.plan?.avisos)}
+    ${t.op.marcas && (t.plan?.avisos || []).some((a) => a.includes("sin marcas de corte sí entrarían"))
+      ? `<div class="aviso-dobles">Sin marcas de corte entran más páginas por pliego. Se corta con las medidas del montaje (o con marcas en una prueba).
+          <button class="boton boton-naranja boton-chico" type="button" id="lb-sin-marcas">Montar sin marcas para meter más páginas</button></div>` : ""}
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver las firmas" : "Sube el interior para ver las firmas", true)}`;
   pintarCotizacion("libro");
   pintarCompararLibro();
@@ -1499,6 +1502,7 @@ function calcularLibro() {
   if (carasLb?.length) pedirMiniaturas(t, carasLb[Math.min(t.cara, carasLb.length - 1)].ubicaciones.map((u) => u.pagina), calcularLibro);
   if (!pintar(caja, html)) return;
   conectarPaginador(caja, t, calcularLibro);
+  $("#lb-sin-marcas", caja)?.addEventListener("click", () => { t.op.marcas = false; t.cara = 0; vistaLibro($("#vista")); avisar("Marcas de corte quitadas"); });
   $("#lb-a-portada")?.addEventListener("click", () => {
     const po = estado.portada.op;
     po.ancho = t.info.formato.ancho; po.alto = t.info.formato.alto; po.paginas = p.paginas_libro;

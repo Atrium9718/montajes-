@@ -156,10 +156,26 @@ fn grilla(e: &Esquema, p: &ParametrosLibro) -> Grilla {
     Grilla { anchos, altos }
 }
 
+/// Páginas de la firma más grande que entra en el pliego (0 si ninguna).
+fn mayor_firma(p: &ParametrosLibro, paginas_libro: u32) -> u32 {
+    TAMANOS_FIRMA
+        .into_iter()
+        .filter(|n| *n <= paginas_libro)
+        .find(|n| Esquema::estandar(*n).is_ok_and(|e| cabe(&grilla(&e, p), p).is_some()))
+        .unwrap_or(0)
+}
+
+/// Franja extra (a los dos lados) que piden las marcas alrededor del bloque.
+/// La grilla ya trae el refile por fuera (que es al menos el rebase), así que
+/// solo se suma lo que las marcas pasan más allá de él.
+fn borde_marcas(p: &ParametrosLibro) -> f64 {
+    2.0 * (p.marcas.espacio_necesario(p.rebase) - p.refile.max(p.rebase)).max(0.0)
+}
+
 /// `Some(girada)` si la firma cabe en el pliego (prefiere sin girar).
 fn cabe(g: &Grilla, p: &ParametrosLibro) -> Option<bool> {
     let area = p.margenes.area_imprimible(p.pliego);
-    let borde = 2.0 * p.marcas.espacio_necesario(p.rebase);
+    let borde = borde_marcas(p);
     let (w, h) = (g.ancho() + borde, g.alto() + borde);
     if w <= area.ancho + 1e-6 && h <= area.alto + 1e-6 {
         Some(false)
@@ -182,7 +198,7 @@ fn por_que_no_cabe_mas(p: &ParametrosLibro, mayor: u32, paginas_libro: u32) -> O
     let area = p.margenes.area_imprimible(p.pliego);
     let necesita = |q: &ParametrosLibro| {
         let g = grilla(&e, q);
-        let borde = 2.0 * q.marcas.espacio_necesario(q.rebase);
+        let borde = borde_marcas(q);
         let (w, h) = (g.ancho() + borde, g.alto() + borde);
         // La orientación que menos falta.
         let normal = (w - area.ancho).max(0.0) + (h - area.alto).max(0.0);
@@ -248,7 +264,7 @@ impl Montaje {
 
 fn montaje(g: &Grilla, p: &ParametrosLibro, girada: bool) -> (Montaje, Option<String>) {
     let (_, _, area) = area_virtual(p, girada);
-    let borde = 2.0 * p.marcas.espacio_necesario(p.rebase);
+    let borde = borde_marcas(p);
     let columnas = (((area.ancho - borde + 1e-6) / g.ancho()).floor() as u32).max(1);
     let filas = (((area.alto - borde + 1e-6) / g.alto()).floor() as u32).max(1);
     let una = Montaje { girada, columnas: 1, filas: 1, tira_retira: false };
@@ -312,7 +328,26 @@ fn numerar(firmas: &[u32], total: u32, anidada: bool) -> Vec<Vec<u32>> {
         .collect()
 }
 
-pub fn planificar(p: &ParametrosLibro) -> Resultado<PlanLibro> {
+pub fn planificar(original: &ParametrosLibro) -> Resultado<PlanLibro> {
+    let mut ajustado = original.clone();
+    let mut aviso_marcas = None;
+    // Marcas compactas (3 mm, pegadas al rebase) si así entra una firma mayor.
+    if original.firma.is_none() && original.cuadernillos.is_empty() && original.marcas.corte {
+        let compactas = ParametrosLibro {
+            marcas: OpcionesMarcas { largo: 3.0, desfase: 0.0, ..original.marcas.clone() },
+            ..original.clone()
+        };
+        let total = original.paginas.div_ceil(4) * 4;
+        let (normal, compacta) = (mayor_firma(original, total), mayor_firma(&compactas, total));
+        if compacta > normal && original.marcas.largo > 3.0 {
+            aviso_marcas = Some(format!(
+                "marcas de corte de 3 mm junto al rebase para que entren {compacta} páginas por pliego ({} por cara)",
+                compacta / 2
+            ));
+            ajustado = compactas;
+        }
+    }
+    let p = &ajustado;
     if p.paginas == 0 {
         return Err(Error::Invalido("el libro no tiene páginas".into()));
     }
@@ -334,7 +369,7 @@ pub fn planificar(p: &ParametrosLibro) -> Resultado<PlanLibro> {
     }
     let paginas_libro = if p.cuadernillos.is_empty() { p.paginas.div_ceil(4) * 4 } else { manual };
     let blancas = paginas_libro - p.paginas;
-    let mut avisos = Vec::new();
+    let mut avisos: Vec<String> = aviso_marcas.into_iter().collect();
     if blancas > 0 {
         avisos.push(format!("se agregan {blancas} páginas en blanco al final para completar los cuadernillos"));
     }
