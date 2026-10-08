@@ -272,6 +272,29 @@ export function generar_combinado(pdf, peticion, icc) {
 }
 
 /**
+ * Guardas (hojas de cortesía pegadas a la tapa) armadas en su pliego
+ * extendido —dos veces el formato con el pliegue al centro— y, si se pide,
+ * montadas aparte en el pliego de la máquina.
+ * @param {Uint8Array} pdf
+ * @param {string} peticion
+ * @param {Uint8Array} icc
+ * @returns {Resultado}
+ */
+export function generar_guardas(pdf, peticion, icc) {
+    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(peticion, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(icc, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.generar_guardas(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Resultado.__wrap(ret[0]);
+}
+
+/**
  * @param {Uint8Array} pdf
  * @param {string} peticion
  * @param {Uint8Array} icc

@@ -801,9 +801,11 @@ const ROLES = [
   ["segunda", "2.ª de forros · retiro"], ["tercera", "3.ª de forros · retiro"],
   ["solapa_portada_interior", "Solapa de portada · retiro"], ["solapa_contraportada_interior", "Solapa de contraportada · retiro"],
   ["interior", "Carátula interior completa · retiro"],
+  ["guarda_del", "Guarda delantera"], ["guarda_tras", "Guarda trasera"],
   ["excluir", "No usar"],
 ];
-const ROLES_CARATULA = ROLES.map(([r]) => r).filter((r) => r !== "tripa" && r !== "excluir");
+const ROLES_GUARDA = ["guarda_del", "guarda_tras"];
+const ROLES_CARATULA = ROLES.map(([r]) => r).filter((r) => r !== "tripa" && r !== "excluir" && !ROLES_GUARDA.includes(r));
 const NOMBRE_ROL = Object.fromEntries(ROLES);
 
 /** Propuesta inicial: las páginas de otro tamaño (pliegos extendidos) son la carátula. */
@@ -845,15 +847,17 @@ function bloquePaginasLibro(t) {
   const n = roles.length;
   const tripa = tripaDe(t).length;
   const caratula = roles.filter((r) => ROLES_CARATULA.includes(r)).length;
+  const guardas = roles.filter((r) => ROLES_GUARDA.includes(r)).length;
   return `<section class="tarjeta paso paginas-libro">
     <div class="paso-titulo"><span class="paso-num">✦</span><h3>¿Qué es cada página?</h3></div>
-    <p class="tenue" style="font-size:14px"><b>${tripa}</b> de tripa · <b>${caratula}</b> de carátula${roles.includes("excluir") ? ` · ${roles.filter((r) => r === "excluir").length} sin usar` : ""}. Marca la portada y la contraportada (tiro) y sus interiores (retiro).</p>
+    <p class="tenue" style="font-size:14px"><b>${tripa}</b> de tripa · <b>${caratula}</b> de carátula${guardas ? ` · <b>${guardas}</b> de guardas` : ""}${roles.includes("excluir") ? ` · ${roles.filter((r) => r === "excluir").length} sin usar` : ""}. Marca la portada y la contraportada (tiro), sus interiores (retiro) y las guardas: cada grupo se monta aparte de la tripa.</p>
     <div class="chips">
       <button class="chip" type="button" data-preset="tripa">Todo es tripa</button>
       ${n >= 6 ? `<button class="chip" type="button" data-preset="extremos">Carátula: 1.ª y última</button>` : ""}
       ${n >= 8 ? `<button class="chip" type="button" data-preset="forros">Carátula con interiores: 1, 2, penúltima, última</button>` : ""}
+      ${n >= 12 ? `<button class="chip" type="button" data-preset="guardas">Carátula 1 y última + guardas 2-3 y antepenúltima-penúltima</button>` : ""}
     </div>
-    <div class="grilla-paginas">${roles.map((r, i) => `<label class="pagina-rol ${r === "tripa" ? "" : `rol-${r === "excluir" ? "excluir" : "caratula"}`}">
+    <div class="grilla-paginas">${roles.map((r, i) => `<label class="pagina-rol ${r === "tripa" ? "" : `rol-${r === "excluir" ? "excluir" : ROLES_GUARDA.includes(r) ? "guarda" : "caratula"}`}">
       <span class="pagina-mini">${t.mini?.[i] ? `<img src="${t.mini[i]}" alt="">` : ""}<b>${i + 1}</b></span>
       <select data-rol="${i}" aria-label="Página ${i + 1}">${ROLES.map(([v, txt]) => `<option value="${v}" ${v === r ? "selected" : ""}>${txt}</option>`).join("")}</select>
     </label>`).join("")}</div>
@@ -867,6 +871,11 @@ function conectarPaginasLibro(main, t) {
     const i = Number(sel.dataset.rol), rol = sel.value;
     // Cada panel de la carátula es una sola página: la anterior queda sin usar.
     if (ROLES_CARATULA.includes(rol)) t.roles.forEach((r, k) => { if (r === rol && k !== i) t.roles[k] = "excluir"; });
+    // Cada guarda es una página extendida o dos sueltas: la tercera desplaza a la primera.
+    if (ROLES_GUARDA.includes(rol)) {
+      const otras = t.roles.map((r, k) => (r === rol && k !== i ? k : -1)).filter((k) => k >= 0);
+      if (otras.length >= 2) t.roles[otras[0]] = "excluir";
+    }
     t.roles[i] = rol;
     redibujar();
   }));
@@ -875,6 +884,10 @@ function conectarPaginasLibro(main, t) {
     t.roles = t.roles.map(() => "tripa");
     if (b.dataset.preset === "extremos") { t.roles[0] = "portada"; t.roles[n - 1] = "contraportada"; }
     if (b.dataset.preset === "forros") { t.roles[0] = "portada"; t.roles[1] = "segunda"; t.roles[n - 2] = "tercera"; t.roles[n - 1] = "contraportada"; }
+    if (b.dataset.preset === "guardas") {
+      t.roles[0] = "portada"; t.roles[n - 1] = "contraportada";
+      t.roles[1] = t.roles[2] = "guarda_del"; t.roles[n - 3] = t.roles[n - 2] = "guarda_tras";
+    }
     redibujar();
   }));
   // Miniaturas de todas las páginas (hasta 300) para reconocerlas.
@@ -958,6 +971,53 @@ function pintarCaratula() {
   };
   $("#car-montada", caja)?.addEventListener("click", (e) => descargarCaratula(true, e.currentTarget));
   $("#car-sola", caja)?.addEventListener("click", (e) => descargarCaratula(false, e.currentTarget));
+}
+
+// Guardas: cada una es un pliego extendido (dos veces el formato, pliegue al
+// centro) que se imprime aparte, casi siempre en otro papel.
+function peticionGuardas(maquina, montar) {
+  const t = estado.libro, o = t.op;
+  const guardas = ROLES_GUARDA.map((rol) => ({ nombre: NOMBRE_ROL[rol], paginas: t.roles.map((r, i) => (r === rol ? i : -1)).filter((i) => i >= 0) }))
+    .filter((g) => g.paginas.length);
+  return {
+    formato: formatoTripa(t), guardas, rebase: o.rebase, marcas: true, maquina, montar,
+    titulo: `${base(t.archivo?.nombre)} guardas`, fecha: ahora(), correcciones: correcciones(),
+  };
+}
+
+function pintarGuardas() {
+  const caja = $("#lb-guardas");
+  if (!caja) return;
+  const t = estado.libro;
+  const p = t.info ? peticionGuardas(null, false) : { guardas: [] };
+  if (!p.guardas.length) { caja.innerHTML = ""; return; }
+  const maquina = maquinaElegida("lb-maquina");
+  const f = p.formato;
+  const descripcion = p.guardas.map((g) => `${g.nombre}: ${g.paginas.length === 1 ? `pág. ${g.paginas[0] + 1} (extendida)` : `págs. ${g.paginas[0] + 1} y ${g.paginas[1] + 1}`}`).join("<br>");
+  caja.innerHTML = `<section class="tarjeta caratula">
+    <div class="paso-titulo"><span class="orbe cotizacion-orbe" aria-hidden="true"></span><div><h3>Guardas</h3><p class="tenue" style="font-size:14px">${descripcion}</p></div></div>
+    <p class="explicacion-clara">Cada guarda se arma extendida, de <b>${mm(f.ancho * 2, 1)} × ${mm(f.alto, 1)} mm</b> con el pliegue al centro, y se monta aparte de la tripa${p.guardas.length > 1 ? "; la delantera y la trasera van juntas en el mismo pliego cuando caben" : ""}. Marca dos páginas sueltas (izquierda y derecha) o una sola ya extendida.</p>
+    <div class="acciones-resultado">
+      <button class="boton" type="button" id="gu-montada">Descargar guardas montadas en ${esc(maquina?.nombre || "la máquina")}</button>
+      <button class="boton boton-claro" type="button" id="gu-sola">Descargar guardas sueltas</button>
+    </div>
+  </section>`;
+  const descargarGuardas = async (montar, boton) => {
+    const texto = boton.textContent;
+    boton.disabled = true; boton.textContent = "Generando…";
+    await respirar();
+    try {
+      const icc = montar && maquina ? (await iccDB.leer(maquina.id)) || new Uint8Array() : new Uint8Array();
+      const r = motor.generar_guardas(t.archivo.bytes, JSON.stringify(peticionGuardas(maquina, montar)), icc);
+      const inf = JSON.parse(r.informe);
+      descargar(r.pdf, `${base(t.archivo.nombre)}-guardas${montar ? "-pliego" : ""}.pdf`);
+      avisar(inf.por_pliego ? `Guardas listas: ${inf.por_pliego} por pliego` : `${inf.guardas === 1 ? "Guarda lista" : "Guardas listas"}`);
+      if (inf.avisos?.length) console.info(inf.avisos);
+    } catch (err) { avisar(`${err.message || err}`); }
+    boton.disabled = false; boton.textContent = texto;
+  };
+  $("#gu-montada", caja)?.addEventListener("click", (e) => descargarGuardas(true, e.currentTarget));
+  $("#gu-sola", caja)?.addEventListener("click", (e) => descargarGuardas(false, e.currentTarget));
 }
 
 // ───────────── Cotización ─────────────
@@ -1133,7 +1193,7 @@ function vistaLibro(main) {
           ${bloqueCorrecciones("lb")}
         </section>
       </div>
-      <div class="columna-resultado"><div class="resultado" id="lb-resultado"></div><div id="lb-caratula"></div><div id="lb-cotizacion"></div></div>
+      <div class="columna-resultado"><div class="resultado" id="lb-resultado"></div><div id="lb-caratula"></div><div id="lb-guardas"></div><div id="lb-cotizacion"></div></div>
     </div>`;
   conectarArchivo("lb-archivo", (a) => { analizarArchivo(t, a, true); t.roles = t.info ? rolesIniciales(t.info) : []; vistaLibro(main); });
   conectarPaginasLibro(main, t);
@@ -1228,6 +1288,7 @@ function calcularLibro() {
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver las firmas" : "Sube el interior para ver las firmas", true)}`;
   pintarCotizacion("libro");
   pintarCaratula();
+  pintarGuardas();
   const carasLb = t.plan?.plan?.caras;
   if (carasLb?.length) pedirMiniaturas(t, carasLb[Math.min(t.cara, carasLb.length - 1)].ubicaciones.map((u) => u.pagina), calcularLibro);
   if (!pintar(caja, html)) return;

@@ -389,6 +389,179 @@ pub fn generar_combinado(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado>
     Ok(Resultado { pdf: bytes, informe })
 }
 
+// ───────────────────────── Guardas ─────────────────────────
+
+#[derive(Deserialize)]
+struct Guarda {
+    nombre: String,
+    /// Una página (la guarda extendida) o dos (izquierda y derecha).
+    paginas: Vec<usize>,
+}
+
+#[derive(Deserialize)]
+struct PeticionGuardas {
+    /// Formato final de la tripa (cada mitad de la guarda).
+    formato: Tamano,
+    guardas: Vec<Guarda>,
+    #[serde(default = "tres")]
+    rebase: f64,
+    #[serde(default = "por_defecto_verdadero")]
+    marcas: bool,
+    #[serde(default)]
+    maquina: Option<Maquina>,
+    #[serde(default)]
+    montar: bool,
+    #[serde(default)]
+    titulo: String,
+    #[serde(default)]
+    fecha: u64,
+    #[serde(default)]
+    correcciones: Correcciones,
+}
+
+#[derive(Serialize)]
+struct InformeGuardas {
+    guardas: usize,
+    tamano: Tamano,
+    por_pliego: Option<u32>,
+    pliego: Option<Tamano>,
+    avisos: Vec<String>,
+    pdfx: bool,
+}
+
+/// Guardas (hojas de cortesía pegadas a la tapa) armadas en su pliego
+/// extendido —dos veces el formato con el pliegue al centro— y, si se pide,
+/// montadas aparte en el pliego de la máquina.
+#[wasm_bindgen]
+pub fn generar_guardas(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
+    licencia::exigir()?;
+    let p: PeticionGuardas = serde_json::from_str(peticion).map_err(error)?;
+    if p.guardas.is_empty() {
+        return Err(error("marque al menos una página como guarda"));
+    }
+    // La guarda extendida es una «portada» sin lomo: izquierda + derecha.
+    let extendida = portada::calcular(&ParametrosPortada {
+        pagina: p.formato,
+        lomo_bloque: 0.0,
+        tipo: TipoPortada::Rustica { solapa: 0.0 },
+        rebase: p.rebase,
+        derecha_a_izquierda: false,
+    })
+    .map_err(error)?;
+    let fuente = Fuente::desde_bytes(pdf).map_err(error)?;
+    let op = marcas(p.marcas, false);
+    let mut caras = Vec::new();
+    for g in &p.guardas {
+        let tam = |i: usize| -> R<Tamano> {
+            fuente
+                .paginas
+                .get(i)
+                .map(|x| x.tamano_corte())
+                .ok_or_else(|| error(format!("el PDF no tiene página {}", i + 1)))
+        };
+        let mut cara = match g.paginas.as_slice() {
+            [i] => {
+                let t = tam(*i)?;
+                if (t.ancho - extendida.tamano.ancho).abs() > 0.5 || (t.alto - extendida.tamano.alto).abs() > 0.5 {
+                    return Err(error(format!(
+                        "la página {} ({t}) no mide lo que la guarda extendida: {} × {} mm; marque dos páginas sueltas o revise el formato",
+                        i + 1,
+                        pdf::mm_es(extendida.tamano.ancho),
+                        pdf::mm_es(extendida.tamano.alto)
+                    )));
+                }
+                portada::cara_completa(&extendida, *i, &op)
+            }
+            [izq, der] => portada::cara_armada(
+                &extendida,
+                &[(TipoPanel::Contratapa, *izq, tam(*izq)?), (TipoPanel::Tapa, *der, tam(*der)?)],
+                &op,
+            )
+            .map_err(error)?,
+            _ => return Err(error(format!("la {} debe tener una página extendida o dos sueltas", g.nombre))),
+        };
+        cara.nombre = g.nombre.clone();
+        caras.push(cara);
+    }
+    let perfil = p.maquina.as_ref().map(|m| m.salida.clone()).unwrap_or_default();
+    let opciones = salida(&perfil, icc, &p.titulo, p.fecha, &p.correcciones);
+    let mut avisos = Vec::new();
+    let maquina = match (&p.maquina, p.montar) {
+        (Some(m), true) => m,
+        _ => {
+            let (bytes, mas, pdfx) = escribir(fuente, &caras, &opciones)?;
+            avisos.extend(mas);
+            let informe = InformeGuardas {
+                guardas: caras.len(),
+                tamano: extendida.tamano,
+                por_pliego: None,
+                pliego: None,
+                avisos,
+                pdfx,
+            };
+            return Ok(Resultado { pdf: bytes, informe: serde_json::to_string(&informe).map_err(error)? });
+        }
+    };
+
+    // Montaje aparte: las guardas ya armadas se reparten en el pliego de la
+    // máquina; si son dos distintas, van combinadas en partes iguales.
+    let sin_correcciones = OpcionesSalida { correcciones: Correcciones::ninguna(), icc: None, ..opciones.clone() };
+    let (mut doc, _) = pdf::componer(fuente, &caras, &sin_correcciones).map_err(error)?;
+    let mut intermedio = Vec::new();
+    doc.save_to(&mut intermedio).map_err(error)?;
+    let fuente = Fuente::desde_bytes(&intermedio).map_err(error)?;
+    let parametros = ParametrosNup {
+        pliego: maquina.pliego_max,
+        margenes: Margenes::de_maquina(maquina),
+        pieza: extendida.tamano,
+        rebase: p.rebase,
+        calle: 0.0,
+        orientacion: Orientacion::Auto,
+        marcas: marcas(p.marcas, true),
+    };
+    let d = nup::calcular(&parametros).map_err(|e| error(format!("la guarda no cabe en «{}»: {e}", maquina.nombre)))?;
+    let mut caras_pliego = if caras.len() == 1 {
+        nup::caras_trabajo(&parametros, &d, 1, None)
+    } else {
+        let disenos: Vec<Diseno> = (0..caras.len()).map(|i| Diseno { frente: i, dorso: None, cantidad: 1 }).collect();
+        match nup::combinar(&parametros, &d, &disenos, Volteo::Lateral) {
+            Ok(plan) => plan.caras,
+            Err(_) => {
+                avisos.push("las guardas no caben juntas en un pliego: van en pliegos separados".into());
+                (0..caras.len())
+                    .flat_map(|i| {
+                        let mut c = nup::caras_trabajo(&parametros, &d, 1, None);
+                        for cara in &mut c {
+                            for u in &mut cara.ubicaciones {
+                                u.pagina = i;
+                            }
+                        }
+                        c
+                    })
+                    .collect()
+            }
+        }
+    };
+    for (k, c) in caras_pliego.iter_mut().enumerate() {
+        c.nombre = if caras.len() == 1 {
+            format!("{} montada", caras[0].nombre)
+        } else {
+            format!("Guardas · pliego {}", k + 1)
+        };
+    }
+    let (bytes, mas, pdfx) = escribir(fuente, &caras_pliego, &opciones)?;
+    avisos.extend(mas);
+    let informe = InformeGuardas {
+        guardas: caras.len(),
+        tamano: extendida.tamano,
+        por_pliego: Some(d.piezas()),
+        pliego: Some(parametros.pliego),
+        avisos,
+        pdfx,
+    };
+    Ok(Resultado { pdf: bytes, informe: serde_json::to_string(&informe).map_err(error)? })
+}
+
 // ───────────────────────── Libros y revistas ─────────────────────────
 
 #[derive(Deserialize)]
