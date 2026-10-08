@@ -5,6 +5,7 @@
 //! PDF se hace solo al escribir el archivo (ver [`unidades`]).
 
 pub mod catalogo;
+pub mod codigo_barras;
 pub mod correcciones;
 pub mod cotizacion;
 pub mod error;

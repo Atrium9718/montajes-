@@ -954,7 +954,7 @@ fn portada_cmd(datos: &Path, c: ComandoPortada) -> Result<()> {
             imprimir_portada(&c, &nota);
             let titulo =
                 format!("Portada {} × {} mm · lomo {} mm", mm_es(c.tamano.ancho), mm_es(c.tamano.alto), mm_es(c.lomo));
-            pdf::plantilla_portada(&c, &titulo, &format!("{nota} · rebase {} mm", mm_es(c.rebase)), &salida)?;
+            pdf::plantilla_portada(&c, &titulo, &format!("{nota} · rebase {} mm", mm_es(c.rebase)), None, &salida)?;
             println!("✓ {}", salida.display());
         }
         ComandoPortada::Verificar { entrada, dim } => {

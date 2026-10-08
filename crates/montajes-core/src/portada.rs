@@ -227,6 +227,16 @@ fn cara_base(c: &Portada, op: &OpcionesMarcas) -> (Cara, Rect) {
     (cara, corte)
 }
 
+/// Esquina inferior izquierda (mm, sobre el corte) del recuadro blanco del
+/// código de barras: abajo a la derecha de la contratapa, dentro de la zona
+/// segura. `ancho` y `alto` son los del recuadro.
+pub fn posicion_codigo(c: &Portada, ancho: f64, alto: f64) -> Option<(f64, f64)> {
+    let p = c.panel(TipoPanel::Contratapa)?;
+    let x = p.rect.x + p.rect.ancho - c.seguridad - ancho;
+    let y = p.rect.y + c.seguridad;
+    (x >= p.rect.x + c.seguridad && alto + 2.0 * c.seguridad <= p.rect.alto).then_some((x, y))
+}
+
 /// Portada diseñada en una sola página (tapa, lomo y contratapa juntas).
 pub fn cara_completa(c: &Portada, pagina: usize, op: &OpcionesMarcas) -> Cara {
     let (mut cara, corte) = cara_base(c, op);

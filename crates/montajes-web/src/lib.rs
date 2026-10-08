@@ -146,6 +146,12 @@ pub fn cotizar(peticion: &str) -> R<String> {
     serde_json::to_string(&cotizacion::cotizar(&p).map_err(error)?).map_err(error)
 }
 
+/// Código de barras EAN-13 de un ISBN (barras en mm) para dibujarlo en la portada.
+#[wasm_bindgen]
+pub fn codigo_isbn(isbn: &str, escala: f64) -> R<String> {
+    serde_json::to_string(&montajes_core::codigo_barras::isbn(isbn, escala, 0.0).map_err(error)?).map_err(error)
+}
+
 /// Marca TrimBox y BleedBox en el interior que sale de la diagramación
 /// (páginas compuestas con el rebase dentro de la MediaBox).
 #[wasm_bindgen]
@@ -490,6 +496,9 @@ struct PeticionPortada {
     /// Qué es cada página del PDF al armar: "tapa", "contratapa", "lomo"…
     #[serde(default)]
     orden: Vec<TipoPanel>,
+    /// ISBN para el código de barras de la contratapa.
+    #[serde(default)]
+    isbn: Option<String>,
     #[serde(default)]
     titulo: String,
     #[serde(default)]
@@ -542,7 +551,11 @@ pub fn plantilla_portada(peticion: &str) -> R<Resultado> {
     );
     let nota =
         format!("{} · rebase {} mm", if p.titulo.is_empty() { "Montajes" } else { &p.titulo }, pdf::mm_es(c.rebase));
-    let mut doc = pdf::documento_plantilla_portada(&c, &titulo, &nota);
+    let codigo = match p.isbn.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => Some(montajes_core::codigo_barras::isbn(t, 1.0, 0.0).map_err(error)?),
+        None => None,
+    };
+    let mut doc = pdf::documento_plantilla_portada(&c, &titulo, &nota, codigo.as_ref());
     let mut bytes = Vec::new();
     doc.save_to(&mut bytes).map_err(error)?;
     Ok(Resultado { pdf: bytes, informe: serde_json::to_string(&c).map_err(error)? })

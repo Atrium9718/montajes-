@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat, dictionary};
 
 use crate::catalogo::VersionPdfx;
+use crate::codigo_barras::CodigoBarras;
 use crate::correcciones::{Conteo, Correcciones, FormaPendiente, corregir_flujo, recursos_con_sobreimpresion};
 use crate::geometria::{Rect, Tamano};
 use crate::imposicion::Cara;
@@ -545,6 +546,37 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
 
 /// Texto para un flujo de contenido con fuente WinAnsi: escapa paréntesis y
 /// convierte a Latin-1 (cubre tildes, ñ y ×).
+/// Recuadro blanco del código: símbolo más la línea «ISBN …» encima (mm).
+pub fn caja_codigo(cod: &CodigoBarras) -> (f64, f64) {
+    (cod.ancho, cod.alto + cod.cuerpo * 2.2 + 1.0)
+}
+
+/// Operadores PDF del código de barras con su recuadro blanco, con la esquina
+/// inferior izquierda del recuadro en (x, y) mm. Usa la fuente /F1 (Helvetica).
+pub fn dibujar_codigo(cod: &CodigoBarras, x: f64, y: f64) -> Vec<u8> {
+    let (ancho, alto) = caja_codigo(cod);
+    let p = |v: f64| n(mm_a_pt(v));
+    let mut s = format!("q 0 0 0 0 k {} {} {} {} re f 0 0 0 1 k\n", p(x), p(y), p(ancho), p(alto));
+    let base_barras = y + 0.5;
+    for b in &cod.barras {
+        s += &format!("{} {} {} {} re ", p(x + b.x), p(base_barras + b.y), p(b.ancho), p(b.alto));
+    }
+    s += "f\n";
+    let tam = mm_a_pt(cod.cuerpo) / 0.72; // altura de mayúscula ≈ 0,72 em
+    let mut texto = |t: &str, cx: f64, linea: f64, tam: f64| {
+        let largo = 0.556 * tam * t.chars().count() as f64; // dígitos de Helvetica: 556/1000 em
+        s += &format!("BT /F1 {} Tf 1 0 0 1 {} {} Tm ", n(tam), n(mm_a_pt(cx) - largo / 2.0), n(mm_a_pt(linea)));
+        s += &String::from_utf8_lossy(&texto_pdf(t));
+        s += " Tj ET\n";
+    };
+    for d in &cod.digitos {
+        texto(&d.texto, x + d.x, base_barras + d.y, tam);
+    }
+    texto(&format!("ISBN {}", cod.isbn), x + ancho / 2.0, base_barras + cod.alto + cod.cuerpo * 0.6, tam * 0.85);
+    s += "Q\n";
+    s.into_bytes()
+}
+
 fn texto_pdf(s: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(s.len() + 2);
     v.push(b'(');
@@ -571,13 +603,19 @@ pub fn mm_es(v: f64) -> String {
 /// Plantilla de portada para el diseñador: página del tamaño final con
 /// rebase y guías (corte, rebase, pliegues, zona segura, rótulos) en una capa
 /// que se ve en pantalla pero no se imprime.
-pub fn plantilla_portada(c: &Portada, titulo: &str, nota: &str, destino: &Path) -> Resultado<()> {
-    documento_plantilla_portada(c, titulo, nota).save(destino)?;
+pub fn plantilla_portada(
+    c: &Portada,
+    titulo: &str,
+    nota: &str,
+    isbn: Option<&CodigoBarras>,
+    destino: &Path,
+) -> Resultado<()> {
+    documento_plantilla_portada(c, titulo, nota, isbn).save(destino)?;
     Ok(())
 }
 
 /// Igual que [`plantilla_portada`], pero en memoria.
-pub fn documento_plantilla_portada(c: &Portada, titulo: &str, nota: &str) -> Document {
+pub fn documento_plantilla_portada(c: &Portada, titulo: &str, nota: &str, isbn: Option<&CodigoBarras>) -> Document {
     const MARGEN: f64 = 20.0;
     let r = c.rebase;
     let ancho = c.tamano.ancho + 2.0 * (r + MARGEN);
@@ -664,6 +702,13 @@ pub fn documento_plantilla_portada(c: &Portada, titulo: &str, nota: &str) -> Doc
         "Cian: corte · Rojo: rebase · Magenta: pliegues · Verde: zona segura. Las guías no se imprimen.",
     );
     s.extend_from_slice(b"Q EMC\n");
+    // Código de barras del ISBN: sí se imprime (K 100 % sobre recuadro blanco).
+    if let Some(cod) = isbn {
+        let (ancho_caja, alto_caja) = caja_codigo(cod);
+        if let Some((x, y)) = crate::portada::posicion_codigo(c, ancho_caja, alto_caja) {
+            s.extend(dibujar_codigo(cod, corte.x + x, corte.y + y));
+        }
+    }
 
     let mut doc = Document::with_version("1.6");
     let fuente = doc.add_object(dictionary! {
