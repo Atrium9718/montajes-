@@ -842,14 +842,35 @@ function textoCuadernillos(t) {
   return `${lista.length} cuadernillos, ${suma} páginas${suma > tripa ? ` (${suma - tripa} en blanco al final)` : ""}.`;
 }
 
+/** Páginas dobles: miden el doble de ancho que las sencillas (pliegos de lectura). */
+function paginasDobles(info) {
+  if (!info) return { dobles: [], todas: false };
+  const sencilla = Math.min(...info.paginas.map((p) => p.ancho));
+  const dobles = info.paginas.map((p, i) => (Math.abs(p.ancho - 2 * sencilla) <= sencilla * 0.03 ? i : -1)).filter((i) => i >= 0);
+  // Todas apaisadas e iguales: puede ser un PDF entero en pliegos de lectura.
+  const todas = !dobles.length && info.paginas.length > 1 && info.paginas.every((p) => p.ancho > p.alto * 1.2);
+  return { dobles, todas };
+}
+function rangos(indices) {
+  const r = [];
+  for (const i of indices) { const u = r.at(-1); if (u && u[1] === i - 1) u[1] = i; else r.push([i, i]); }
+  return r.map(([a, b]) => (a === b ? `${a + 1}` : `${a + 1}–${b + 1}`)).join(", ");
+}
+
 function bloquePaginasLibro(t) {
   const roles = t.roles || [];
+  const { dobles, todas } = paginasDobles(t.info);
+  const avisoDobles = dobles.length
+    ? `<div class="aviso-dobles"><b>Este PDF trae páginas dobles (pliegos de lectura): ${dobles.length === 1 ? "la página" : "las páginas"} ${rangos(dobles)}.</b> Cada una son dos páginas seguidas en la misma hoja; para compaginar la revista hay que separarlas.
+        <button class="boton boton-naranja boton-chico" type="button" id="lb-separar" data-dobles="${dobles.join(",")}">Separar en páginas sencillas</button></div>`
+    : todas ? `<div class="aviso-dobles">¿El PDF viene en pliegos de lectura (dos páginas por hoja)? <button class="boton boton-claro boton-chico" type="button" id="lb-separar" data-dobles="${t.info.paginas.map((_, i) => i).join(",")}">Separar todas en páginas sencillas</button></div>` : "";
   const n = roles.length;
   const tripa = tripaDe(t).length;
   const caratula = roles.filter((r) => ROLES_CARATULA.includes(r)).length;
   const guardas = roles.filter((r) => ROLES_GUARDA.includes(r)).length;
   return `<section class="tarjeta paso paginas-libro">
     <div class="paso-titulo"><span class="paso-num">✦</span><h3>¿Qué es cada página?</h3></div>
+    ${avisoDobles}
     <p class="tenue" style="font-size:14px"><b>${tripa}</b> de tripa · <b>${caratula}</b> de carátula${guardas ? ` · <b>${guardas}</b> de guardas` : ""}${roles.includes("excluir") ? ` · ${roles.filter((r) => r === "excluir").length} sin usar` : ""}. Marca la portada y la contraportada (tiro), sus interiores (retiro) y las guardas: cada grupo se monta aparte de la tripa.</p>
     <div class="chips">
       <button class="chip" type="button" data-preset="tripa">Todo es tripa</button>
@@ -866,6 +887,19 @@ function bloquePaginasLibro(t) {
 
 function conectarPaginasLibro(main, t) {
   const redibujar = () => { const y = window.scrollY; vistaLibro(main); window.scrollTo(0, y); };
+  $("#lb-separar", main)?.addEventListener("click", async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true; b.textContent = "Separando…";
+    await respirar();
+    try {
+      const dobles = b.dataset.dobles.split(",").map(Number);
+      const bytes = motor.separar_dobles(t.archivo.bytes, JSON.stringify(dobles));
+      analizarArchivo(t, { nombre: `${base(t.archivo.nombre)}-paginas.pdf`, tamano: bytes.length, bytes }, true);
+      t.roles = t.info ? rolesIniciales(t.info) : [];
+      avisar(`Listo: ${t.info?.paginas.length} páginas sencillas`);
+    } catch (err) { avisar(`${err.message || err}`); }
+    redibujar();
+  });
   $$("[data-rol]", main).forEach((sel) => sel.addEventListener("change", (e) => {
     e.stopPropagation();
     const i = Number(sel.dataset.rol), rol = sel.value;
@@ -1176,6 +1210,7 @@ function vistaLibro(main) {
           </label>
           <div class="campo"><span>Páginas por firma</span>${chips("firma", [["auto", "Auto"], ["4", "4"], ["8", "8"], ["16", "16"], ["32", "32"], ["64", "64"]], o.firma)}</div>
           <label class="campo"><span>Cuadernillos a mano (opcional)</span><input type="text" id="lb-cuadernillos" value="${esc(o.cuadernillos || "")}" placeholder="Ej.: 16,16,16,8" autocomplete="off"><small>${textoCuadernillos(t)}</small></label>
+          <div class="campo"><span>Volteo del retiro</span>${chips("volteo", [["maquina", `Según la máquina${maquinaElegida("lb-maquina") ? ` (${maquinaElegida("lb-maquina").volteo === "cabeza" ? "de cabeza" : "de lado"})` : ""}`], ["lateral", "De lado"], ["cabeza", "De cabeza"]], o.volteo || "maquina")}<small>De lado: se voltea conservando la pinza. De cabeza: la cola pasa a ser pinza (pinza y cola se igualan).</small></div>
           <div class="campo"><span>Firmas por pliego</span>${chips("aprovechamiento", [["auto", "Auto"], ["una", "Una"], ["repetir", "Repetir"], ["tira_retira", "Tira y retira"]], o.aprovechamiento)}<small>Auto monta en tira y retira (una sola plancha para las dos caras) cuando la firma cabe dos veces lado a lado.</small></div>
           <details class="avanzado"><summary>Márgenes, lectura y marcas</summary>
             <div class="paso">
@@ -1231,6 +1266,7 @@ function peticionLibro(maquina, info) {
     firma: o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
     derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: o.aprovechamiento || "auto",
+    volteo: !o.volteo || o.volteo === "maquina" ? null : o.volteo,
     titulo: base(estado.libro.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
   };
 }
@@ -1469,7 +1505,7 @@ const EJEMPLOS = [
 function nuevaMaquina(d) {
   return {
     id: d.id, nombre: d.nombre, tipo: d.tipo, pliego_max: d.pliego_max, pliego_min: d.pliego_min ?? null,
-    pinza: d.pinza, cola: d.cola, lateral: d.lateral, plancha: null, colores: d.colores, duplex: d.duplex,
+    pinza: d.pinza, cola: d.cola, lateral: d.lateral, plancha: null, colores: d.colores, duplex: d.duplex, volteo: d.volteo || "lateral",
     salida: { pdfx: d.pdfx || "PDF/X-4", perfil_icc: null, condicion: d.condicion || null, jdf: !!d.jdf }, notas: d.notas || "",
     costos: d.costos || costosPorDefecto(d.tipo),
   };
@@ -1541,6 +1577,7 @@ function listaMaquinas(caja, main) {
           <dt>Pinza / cola</dt><dd>${mm(m.pinza)} / ${mm(m.cola)} mm</dd>
           <dt>Laterales</dt><dd>${mm(m.lateral)} mm</dd>
           <dt>Colores</dt><dd>${m.colores}${m.duplex ? " · dúplex" : ""}</dd>
+          <dt>Volteo</dt><dd>${m.volteo === "cabeza" ? "De cabeza" : "De lado"}</dd>
           <dt>Salida</dt><dd>${esc(m.salida?.pdfx || "PDF/X-4")}${m.salida?.condicion ? ` · ${esc(m.salida.condicion)}` : ""} <span data-icc="${esc(m.id)}"></span></dd>
         </dl>
         <div class="acciones"><button class="boton boton-claro boton-chico" data-editar="${esc(m.id)}" type="button">Editar</button><button class="boton boton-claro boton-chico" data-borrar="${esc(m.id)}" type="button">Borrar</button></div>
@@ -1644,6 +1681,10 @@ function dialogoMaquina(m, main, datosIniciales = null) {
       <label class="campo"><span>Formato de salida</span><select name="pdfx"><option ${v.salida.pdfx === "PDF/X-4" ? "selected" : ""}>PDF/X-4</option><option ${v.salida.pdfx === "PDF/X-1a" ? "selected" : ""}>PDF/X-1a</option></select></label>
     </div>
     ${interruptor("mq-duplex", "Imprime las dos caras en una pasada", v.duplex)}
+    <label class="campo"><span>Volteo del pliego para el retiro</span><select name="volteo">
+      <option value="lateral" ${(v.volteo || "lateral") === "lateral" ? "selected" : ""}>De lado: la pinza se conserva (tira y retira)</option>
+      <option value="cabeza" ${v.volteo === "cabeza" ? "selected" : ""}>De cabeza: la cola pasa a ser pinza (tumble)</option>
+    </select><small>Así se arma el retiro de libros, revistas y carátulas en esta máquina. Se puede cambiar en cada trabajo.</small></label>
     <label class="campo"><span>Condición de impresión</span><select name="condicion">${CONDICIONES.map((c) => `<option ${c === v.salida.condicion ? "selected" : ""}>${c}</option>`).join("")}</select></label>
     <label class="campo"><span>Perfil ICC de salida (opcional)</span><input type="file" name="icc" accept=".icc,.icm"><small>Con el perfil, el PDF sale identificado como PDF/X con su OutputIntent.</small></label>
     ${interruptor("mq-jdf", "Su RIP/CTP recibe JDF", v.salida.jdf)}
@@ -1675,7 +1716,7 @@ function dialogoMaquina(m, main, datosIniciales = null) {
       id: m ? m.id : slug(f.get("nombre")), nombre: String(f.get("nombre")).trim(), tipo,
       pliego_max: { ancho: num(f.get("ancho")), alto: num(f.get("alto")) },
       pinza: num(f.get("pinza")), cola: num(f.get("cola")), lateral: num(f.get("lateral")),
-      colores: Math.round(num(f.get("colores"), 4)), duplex: $("#mq-duplex").checked,
+      colores: Math.round(num(f.get("colores"), 4)), duplex: $("#mq-duplex").checked, volteo: f.get("volteo") === "cabeza" ? "cabeza" : "lateral",
       pdfx: f.get("pdfx"), condicion: f.get("condicion") === "Otra" ? null : f.get("condicion"), jdf: $("#mq-jdf").checked, notas: f.get("notas"),
       pliego_min: v.pliego_min,
       costos: Object.fromEntries(["macula_arranque", "macula_porcentaje", "costo_plancha", "costo_arranque", "costo_millar", "costo_clic", "costo_minimo"].map((k) => [k, Math.max(0, num(f.get(k), 0))])),

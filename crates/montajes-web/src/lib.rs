@@ -164,6 +164,14 @@ pub fn codigo_isbn(isbn: &str, escala: f64) -> R<String> {
     serde_json::to_string(&montajes_core::codigo_barras::isbn(isbn, escala, 0.0).map_err(error)?).map_err(error)
 }
 
+/// Separa las páginas dobles (pliegos de lectura) indicadas en dos sencillas.
+#[wasm_bindgen]
+pub fn separar_dobles(pdf: &[u8], paginas: &str) -> R<Vec<u8>> {
+    licencia::exigir()?;
+    let lista: Vec<usize> = serde_json::from_str(paginas).map_err(error)?;
+    pdf::separar_dobles(pdf, &lista).map_err(error)
+}
+
 /// Marca TrimBox y BleedBox en el interior que sale de la diagramación
 /// (páginas compuestas con el rebase dentro de la MediaBox).
 #[wasm_bindgen]
@@ -602,6 +610,9 @@ struct PeticionLibro {
     /// Páginas del PDF que forman la tripa, en orden (vacío = todas).
     #[serde(default)]
     mapa: Vec<usize>,
+    /// Volteo del retiro; si falta, el de la máquina.
+    #[serde(default)]
+    volteo: Option<Volteo>,
 }
 
 #[derive(Serialize)]
@@ -615,9 +626,12 @@ struct InformeLibro<'a> {
 }
 
 fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)> {
+    // Volteo del retiro: el de la petición o el de la máquina. De cabeza, la
+    // pinza y la cola deben quedar iguales para que el retiro calce.
+    let volteo = p.volteo.unwrap_or(p.maquina.volteo);
     let parametros = ParametrosLibro {
         pliego: pliego(&p.maquina, p.pliego)?,
-        margenes: Margenes::de_maquina(&p.maquina),
+        margenes: Margenes::de_maquina(&p.maquina).para_volteo(volteo),
         pagina: p.formato,
         paginas: if p.mapa.is_empty() { p.paginas } else { p.mapa.len() as u32 },
         encuadernacion: p.encuadernacion,
@@ -631,6 +645,7 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
         aprovechamiento: p.aprovechamiento,
         cuadernillos: p.cuadernillos.clone(),
         mapa: p.mapa.clone(),
+        volteo,
     };
     let plan = firmas::planificar(&parametros).map_err(error)?;
     let lomo = p.calibre_um.map(|c| f64::from(plan.paginas_libro / 2) * c / 1000.0);
@@ -953,7 +968,7 @@ pub fn generar_caratula(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> 
     let mut intermedio = Vec::new();
     doc.save_to(&mut intermedio).map_err(error)?;
     let fuente = Fuente::desde_bytes(&intermedio).map_err(error)?;
-    let volteo = Volteo::Lateral;
+    let volteo = maquina.volteo;
     let mut margenes = Margenes::de_maquina(maquina);
     if con_retiro && !maquina.duplex {
         margenes = margenes.para_volteo(volteo);

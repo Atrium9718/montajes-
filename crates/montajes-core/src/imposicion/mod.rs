@@ -44,10 +44,11 @@ impl Margenes {
 }
 
 /// Cómo se voltea el pliego para imprimir el retiro.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Volteo {
     /// Sobre el eje vertical, conservando la pinza (tira y retira / work & turn).
+    #[default]
     Lateral,
     /// Sobre el eje horizontal, cambiando la pinza (work & tumble).
     Cabeza,

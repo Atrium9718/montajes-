@@ -118,6 +118,9 @@ struct ArgsMaquina {
     /// Imprime ambas caras en una pasada.
     #[arg(long)]
     duplex: bool,
+    /// Cómo se voltea el pliego para el retiro.
+    #[arg(long, value_enum, default_value = "lateral")]
+    volteo: VolteoArg,
     #[arg(long, value_enum, default_value = "x4")]
     pdfx: Pdfx,
     /// Perfil ICC CMYK de la condición de impresión.
@@ -355,6 +358,9 @@ struct ArgsLibro {
     /// Solo calcular y mostrar el plan, sin escribir el PDF.
     #[arg(long)]
     simular: bool,
+    /// Volteo del retiro (por defecto el de la máquina).
+    #[arg(long, value_enum)]
+    volteo: Option<VolteoArg>,
 }
 
 #[derive(Args)]
@@ -543,6 +549,10 @@ fn maquina(datos: &Path, c: ComandoMaquina) -> Result<()> {
                 plancha: a.plancha.map(|tamano| Plancha { tamano, desfase_pinza: a.plancha_desfase }),
                 colores: a.colores,
                 duplex: a.duplex,
+                volteo: match a.volteo {
+                    VolteoArg::Lateral => Volteo::Lateral,
+                    VolteoArg::Cabeza => Volteo::Cabeza,
+                },
                 salida: PerfilSalida {
                     pdfx: match a.pdfx {
                         Pdfx::X4 => VersionPdfx::X4,
@@ -789,9 +799,15 @@ fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
         EncuadernacionArg::Lomo => Encuadernacion::Lomo,
         EncuadernacionArg::Cosido => Encuadernacion::Cosido,
     };
+    let volteo = match a.volteo {
+        Some(VolteoArg::Lateral) => Volteo::Lateral,
+        Some(VolteoArg::Cabeza) => Volteo::Cabeza,
+        None => m.volteo,
+    };
     let parametros = ParametrosLibro {
+        volteo,
         pliego: pliego_de(&m, a.pliego)?,
-        margenes: Margenes::de_maquina(&m),
+        margenes: Margenes::de_maquina(&m).para_volteo(volteo),
         pagina,
         paginas: fuente.paginas.len() as u32,
         encuadernacion,

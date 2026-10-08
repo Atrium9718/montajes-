@@ -423,3 +423,4 @@ body.acceso main { display: grid; place-items: center; min-height: 70vh; positio
 .metricas-cuenta .metrica b { font-size: clamp(22px, 2.6vw, 34px); letter-spacing: -0.02em; overflow-wrap: anywhere; }
 #ad-contenido { display: grid; gap: 20px; }
 .pagina-rol.rol-guarda { border-color: var(--azul); background: color-mix(in srgb, var(--azul) 12%, var(--superficie)); }
+.aviso-dobles { display: grid; gap: 10px; justify-items: start; padding: 14px 16px; border-radius: 14px; font-size: 14px; background: color-mix(in srgb, var(--naranja) 12%, var(--superficie)); }

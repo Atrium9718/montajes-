@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::marcas::{self, Linea, OpcionesMarcas};
 use super::nup::bloque;
 use super::plegado::{Esquema, Lado, Posicion};
-use super::{Cara, Margenes, Ubicacion};
+use super::{Cara, Margenes, Ubicacion, Volteo};
 use crate::geometria::{Rect, Tamano};
 use crate::{Error, Resultado};
 
@@ -80,6 +80,11 @@ pub struct ParametrosLibro {
     /// no es el PDF entero (p. ej. trae la carátula). Vacío = en orden.
     #[serde(default)]
     pub mapa: Vec<usize>,
+    /// Cómo se voltea el pliego para el retiro: de lado (la pinza se conserva)
+    /// o de cabeza (la cola pasa a ser pinza). Con volteo de cabeza los
+    /// márgenes de pinza y cola deben ser iguales (`Margenes::para_volteo`).
+    #[serde(default)]
+    pub volteo: Volteo,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,11 +204,19 @@ fn montaje(g: &Grilla, p: &ParametrosLibro, girada: bool) -> (Montaje, Option<St
     let repetir = Montaje { girada, columnas, filas, tira_retira: false };
     // Tira y retira: las copias van de a pares lado a lado (el pliego se voltea de lado).
     let pares = Montaje { girada, columnas: columnas - columnas % 2, filas, tira_retira: true };
-    let puede_tr = !girada && columnas >= 2;
+    // La tira y retira de este montaje se voltea de lado: con volteo de cabeza no aplica.
+    let puede_tr = !girada && columnas >= 2 && p.volteo == Volteo::Lateral;
     match p.aprovechamiento {
         Aprovechamiento::Una => (una, None),
         Aprovechamiento::Repetir => (repetir, None),
         Aprovechamiento::TiraRetira if puede_tr => (pares, None),
+        Aprovechamiento::TiraRetira if p.volteo == Volteo::Cabeza => (
+            repetir,
+            Some(
+                "la tira y retira se voltea de lado; con volteo de cabeza la firma se monta repetida en tiro y retiro"
+                    .into(),
+            ),
+        ),
         Aprovechamiento::TiraRetira => {
             (repetir, Some("la firma no cabe dos veces lado a lado: se monta repetida en tiro y retiro".into()))
         }
@@ -439,10 +452,24 @@ fn caras_firma(
             (true, Lado::Retiro) => r.girar_antihorario(alto_v),
         }
     };
-    let giro_extra = |lado: Lado| match (girada, lado) {
-        (false, _) => 0,
-        (true, Lado::Tiro) => 90,
-        (true, Lado::Retiro) => 270,
+    // Volteo de cabeza: respecto al volteo de lado, el retiro queda girado
+    // 180° en el pliego (la cola pasa a ser la pinza).
+    let cabeza = p.volteo == Volteo::Cabeza;
+    let transformar = |lado: Lado, r: Rect| {
+        let r = transformar(lado, r);
+        if cabeza && lado == Lado::Retiro {
+            Rect::new(p.pliego.ancho - r.derecha(), p.pliego.alto - r.arriba(), r.ancho, r.alto)
+        } else {
+            r
+        }
+    };
+    let giro_extra = |lado: Lado| {
+        let base = match (girada, lado) {
+            (false, _) => 0,
+            (true, Lado::Tiro) => 90,
+            (true, Lado::Retiro) => 270,
+        };
+        if cabeza && lado == Lado::Retiro { (base + 180) % 360 } else { base }
     };
 
     // Cada cara junta las piezas de los lados que lleva: en tira y retira,
@@ -526,6 +553,7 @@ mod pruebas {
             aprovechamiento: Aprovechamiento::Una,
             cuadernillos: vec![],
             mapa: vec![],
+            volteo: Volteo::Lateral,
         }
     }
 
@@ -606,6 +634,46 @@ mod pruebas {
                 );
             }
         }
+    }
+
+    #[test]
+    fn volteo_de_cabeza_pone_el_retiro_detras_al_voltear_de_pinza_a_cola() {
+        for (girar, encuadernacion) in [(false, Encuadernacion::Caballete), (true, Encuadernacion::Lomo)] {
+            let mut p = libro(16, encuadernacion);
+            p.volteo = Volteo::Cabeza;
+            p.margenes = Margenes { pinza: 10.0, cola: 6.0, lateral: 5.0 }.para_volteo(Volteo::Cabeza);
+            if girar {
+                p.pliego = Tamano::new(520.0, 720.0);
+            }
+            let plan = planificar(&p).unwrap();
+            let (tiro, retiro) = (&plan.caras[0], &plan.caras[1]);
+            for u in &tiro.ubicaciones {
+                let pareja = if u.pagina % 2 == 0 { u.pagina + 1 } else { u.pagina - 1 };
+                let v = retiro.ubicaciones.iter().find(|v| v.pagina == pareja).unwrap();
+                // Al voltear de cabeza, el punto (x, y) cae en (x, alto − y).
+                let tolerancia = 2.0 * p.fresado + 2.0 + 1e-6;
+                assert!(((u.corte.x + u.corte.ancho / 2.0) - (v.corte.x + v.corte.ancho / 2.0)).abs() < tolerancia);
+                assert!(
+                    ((u.corte.y + u.corte.alto / 2.0) + (v.corte.y + v.corte.alto / 2.0) - p.pliego.alto).abs()
+                        < tolerancia
+                );
+            }
+            // Respecto al volteo de lado, cada página del retiro queda girada 180°.
+            let lateral = planificar(&ParametrosLibro { volteo: Volteo::Lateral, ..p.clone() }).unwrap();
+            for v in &retiro.ubicaciones {
+                let l = lateral.caras[1].ubicaciones.iter().find(|l| l.pagina == v.pagina).unwrap();
+                assert_eq!(v.giro, (l.giro + 180) % 360);
+            }
+        }
+    }
+
+    #[test]
+    fn con_volteo_de_cabeza_no_hay_tira_y_retira() {
+        let mut p = libro(8, Encuadernacion::Lomo);
+        p.aprovechamiento = Aprovechamiento::Auto;
+        p.volteo = Volteo::Cabeza;
+        let plan = planificar(&p).unwrap();
+        assert!(plan.firmas.iter().all(|f| !f.tira_retira));
     }
 
     #[test]

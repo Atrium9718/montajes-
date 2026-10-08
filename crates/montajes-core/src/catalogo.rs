@@ -87,6 +87,9 @@ pub struct Maquina {
     /// Imprime ambas caras en una pasada (perfecting o dúplex digital).
     #[serde(default)]
     pub duplex: bool,
+    /// Cómo se voltea el pliego para el retiro en esta máquina.
+    #[serde(default)]
+    pub volteo: crate::imposicion::Volteo,
     #[serde(default)]
     pub salida: PerfilSalida,
     #[serde(default)]
@@ -285,6 +288,7 @@ mod pruebas {
             cola: 5.0,
             lateral: 5.0,
             plancha: None,
+            volteo: Default::default(),
             colores: 1,
             duplex: false,
             salida: PerfilSalida::default(),

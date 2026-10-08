@@ -240,6 +240,86 @@ pub fn fijar_cajas(bytes: &[u8], rebase_mm: f64) -> Resultado<Vec<u8>> {
     Ok(salida)
 }
 
+/// Separa las páginas dobles (pliegos de lectura: dos páginas seguidas en una
+/// hoja) en dos páginas sencillas, en orden: primero la izquierda. Las demás
+/// páginas quedan igual. El contenido no se toca: cada mitad es la misma
+/// página con sus cajas (TrimBox, BleedBox y CropBox) recortadas a su lado;
+/// en el lomo, el rebase es la continuación de la página vecina.
+pub fn separar_dobles(bytes: &[u8], dobles: &[usize]) -> Resultado<Vec<u8>> {
+    let mut doc = Document::load_mem(bytes)?;
+    if doc.is_encrypted() {
+        return Err(Error::Invalido("el PDF está protegido con contraseña".into()));
+    }
+    let paginas: Vec<ObjectId> = doc.get_pages().into_values().collect();
+    let raiz = doc.catalog()?.get(b"Pages")?.as_reference()?;
+    let arreglo = |c: Caja| Object::Array(vec![c.x0.into(), c.y0.into(), c.x1.into(), c.y1.into()]);
+    let mut nuevas = Vec::with_capacity(paginas.len() + dobles.len());
+    for (i, &id) in paginas.iter().enumerate() {
+        // Atributos heredados copiados a la página, para poder moverla de árbol.
+        for clave in [&b"MediaBox"[..], b"CropBox", b"Rotate", b"Resources"] {
+            let falta = doc.get_dictionary(id).map(|p| !p.has(clave)).unwrap_or(false);
+            if falta && let Some(valor) = heredado(&doc, id, clave) {
+                doc.get_dictionary_mut(id)?.set(clave.to_vec(), valor);
+            }
+        }
+        if !dobles.contains(&i) {
+            doc.get_dictionary_mut(id)?.set("Parent", raiz);
+            nuevas.push(id);
+            continue;
+        }
+        let giro = heredado(&doc, id, b"Rotate").and_then(|o| resolver(&doc, &o).as_i64().ok()).unwrap_or(0);
+        if giro.rem_euclid(360) != 0 {
+            return Err(Error::Invalido(format!("la página {} está girada; no se puede separar en dos", i + 1)));
+        }
+        let media = heredado(&doc, id, b"MediaBox")
+            .and_then(|o| caja(&doc, &o))
+            .ok_or_else(|| Error::Invalido("página sin MediaBox".into()))?;
+        let propia = |clave: &[u8]| {
+            doc.get_dictionary(id).ok()?.get(clave).ok().and_then(|o| caja(&doc, o)).map(|c| c.interseccion(&media))
+        };
+        let recorte = propia(b"CropBox").unwrap_or(media);
+        let corte = propia(b"TrimBox").or_else(|| propia(b"ArtBox")).unwrap_or(recorte);
+        let sangrado = propia(b"BleedBox").unwrap_or(recorte);
+        // Rebase disponible por fuera (el menor de los cuatro lados).
+        let r = [corte.x0 - sangrado.x0, corte.y0 - sangrado.y0, sangrado.x1 - corte.x1, sangrado.y1 - corte.y1]
+            .into_iter()
+            .fold(f64::INFINITY, f64::min)
+            .max(0.0);
+        let medio = (corte.x0 + corte.x1) / 2.0;
+        let original = doc.get_dictionary(id)?.clone();
+        for izquierda in [true, false] {
+            let (c, b) = if izquierda {
+                (
+                    Caja { x1: medio, ..corte },
+                    Caja { x0: sangrado.x0, y0: sangrado.y0, x1: (medio + r).min(media.x1), y1: sangrado.y1 },
+                )
+            } else {
+                (
+                    Caja { x0: medio, ..corte },
+                    Caja { x0: (medio - r).max(media.x0), y0: sangrado.y0, x1: sangrado.x1, y1: sangrado.y1 },
+                )
+            };
+            let mut d = original.clone();
+            d.set("Parent", raiz);
+            d.set("TrimBox", arreglo(c));
+            d.set("BleedBox", arreglo(b));
+            d.set("CropBox", arreglo(b));
+            d.remove(b"ArtBox");
+            nuevas.push(doc.add_object(Object::Dictionary(d)));
+        }
+    }
+    let raiz_dic = doc.get_dictionary_mut(raiz)?;
+    raiz_dic.set("Kids", Object::Array(nuevas.iter().map(|&k| Object::Reference(k)).collect()));
+    raiz_dic.set("Count", nuevas.len() as i64);
+    for k in [b"MediaBox".as_slice(), b"CropBox", b"Rotate", b"Resources"] {
+        raiz_dic.remove(k);
+    }
+    doc.prune_objects();
+    let mut salida = Vec::new();
+    doc.save_to(&mut salida)?;
+    Ok(salida)
+}
+
 /// Atributo de página heredable (MediaBox, CropBox, Rotate, Resources).
 /// Une documentos en uno: renumera los objetos de cada uno, copia en cada
 /// página los atributos que heredaba (cajas, giro, recursos) y arma un árbol
@@ -1104,6 +1184,46 @@ mod pruebas {
         assert!((t.ancho - 148.0).abs() < 0.01 && (t.alto - 210.0).abs() < 0.01, "{t}");
         assert!((p.rebase_disponible() - 3.0).abs() < 0.01);
         assert!(fijar_cajas(&bytes, 200.0).is_err());
+    }
+
+    #[test]
+    fn separar_dobles_parte_el_pliego_de_lectura_en_dos() {
+        let mut doc = Document::with_version("1.7");
+        let paginas = doc.new_object_id();
+        let mut kids = Vec::new();
+        for ancho in [148.0, 296.0, 148.0] {
+            let contenido = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+            let caja = |a: f64, b: f64, c: f64, d: f64| {
+                vec![
+                    Object::Real(mm_a_pt(a) as f32),
+                    Object::Real(mm_a_pt(b) as f32),
+                    Object::Real(mm_a_pt(c) as f32),
+                    Object::Real(mm_a_pt(d) as f32),
+                ]
+            };
+            kids.push(Object::Reference(doc.add_object(dictionary! {
+                "Type" => "Page", "Parent" => paginas, "Contents" => contenido,
+                "MediaBox" => caja(0.0, 0.0, ancho + 6.0, 216.0),
+                "TrimBox" => caja(3.0, 3.0, ancho + 3.0, 213.0),
+                "BleedBox" => caja(0.0, 0.0, ancho + 6.0, 216.0),
+            })));
+        }
+        doc.objects
+            .insert(paginas, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 3 }));
+        let catalogo = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => paginas });
+        doc.trailer.set("Root", catalogo);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+
+        let f = Fuente::desde_bytes(&separar_dobles(&bytes, &[1]).unwrap()).unwrap();
+        assert_eq!(f.paginas.len(), 4);
+        for p in &f.paginas {
+            let t = p.tamano_corte();
+            assert!((t.ancho - 148.0).abs() < 0.01 && (t.alto - 210.0).abs() < 0.01, "{t}");
+            assert!((p.rebase_disponible() - 3.0).abs() < 0.01);
+        }
+        // La mitad izquierda va antes que la derecha.
+        assert!(f.paginas[1].corte.x0 < f.paginas[2].corte.x0);
     }
 
     #[test]
