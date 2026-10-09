@@ -9,6 +9,7 @@ pub mod codigo_barras;
 pub mod correcciones;
 pub mod cotizacion;
 pub mod error;
+pub mod fondo;
 pub mod geometria;
 pub mod imposicion;
 pub mod libro;

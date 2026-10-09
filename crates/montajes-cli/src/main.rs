@@ -484,6 +484,10 @@ struct ArgsCorreccion {
     /// Generar el rebase estirando la orilla de la página (solo el fondo).
     #[arg(long)]
     rebase_estirado: bool,
+    /// Generar el rebase con la capa de fondo de la página (la foto o el
+    /// fondo siguen más allá del corte, sin textos ni logos).
+    #[arg(long)]
+    rebase_extendido: bool,
 }
 
 impl ArgsCorreccion {
@@ -496,6 +500,7 @@ impl ArgsCorreccion {
         if self.rebase_estirado {
             c.rebase_estirado = true;
         }
+        c.rebase_extendido = self.rebase_extendido;
         c
     }
 }

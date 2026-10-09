@@ -46,6 +46,11 @@ pub struct Correcciones {
     /// para una página, mandan sobre las opciones de rebase de arriba.
     #[serde(default)]
     pub modos: Vec<Option<[ModoRebase; 4]>>,
+    /// Rebase con la capa de fondo de la página (ver [`crate::fondo`]): la
+    /// foto o el fondo siguen más allá del corte, sin textos ni logos. Manda
+    /// sobre las demás opciones de rebase en las páginas que tienen fondo.
+    #[serde(default)]
+    pub rebase_extendido: bool,
 }
 
 /// Rebase de un borde.
@@ -73,6 +78,7 @@ impl Correcciones {
             rebase_fondo: false,
             fondos: Vec::new(),
             modos: Vec::new(),
+            rebase_extendido: false,
         }
     }
 
@@ -87,6 +93,7 @@ impl Correcciones {
             rebase_fondo: false,
             fondos: Vec::new(),
             modos: Vec::new(),
+            rebase_extendido: false,
         }
     }
 

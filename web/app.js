@@ -81,17 +81,19 @@ const CORRECCIONES = [
 ];
 // Cómo se hace el rebase de cada borde. «auto» lo decide mirando la página.
 const MODOS_REBASE = [
-  ["auto", "Automático (recomendado)", "En cada borde: usa el rebase del PDF si está limpio; si no, lo hace en espejo (sigue degradados y texturas); y si junto al corte hay textos o QR, con el color del fondo."],
+  ["extendido", "Fondo extendido (recomendado)", "El rebase sale solo de la capa de fondo del diseño (la foto, el degradado, las franjas de color): si la foto es más grande que la página se ve su continuación real, y lo que no alcance se completa reflejando ese fondo. Los textos, QR y logos nunca pasan al rebase."],
+  ["auto", "Automático por borde", "En cada borde: usa el rebase del PDF si está limpio; si no, lo hace en espejo; y si junto al corte hay textos o QR, con el color del fondo."],
   ["original", "El que trae el PDF", "Tal cual viene; donde falta, en espejo."],
   ["espejo", "Espejo", "Refleja los 3 mm de la orilla: conserva degradados, fotos y texturas."],
   ["estirar", "Estirar la orilla", "Alarga la última orilla de la página."],
   ["color", "Color del fondo", "Un color plano: el más limpio cuando hay elementos pegados al corte."],
 ];
-const modoRebase = () => (MODOS_REBASE.some(([v]) => v === estado.preferencias.rebaseModo) ? estado.preferencias.rebaseModo : "auto");
+// La versión anterior guardaba «auto» como recomendado: ahora el recomendado es «extendido».
+const modoRebase = () => (MODOS_REBASE.some(([v]) => v === estado.preferencias.rebaseModo) && !(estado.preferencias.rebaseModo === "auto" && !estado.preferencias.rebaseModoElegido) ? estado.preferencias.rebaseModo : "extendido");
 function correcciones() {
   const c = { sobreimprimir_negro: true, quitar_sobreimpresion_blanco: true, linea_minima: true, ...(estado.preferencias.correcciones || {}) };
   // Para páginas sin modo por borde (no se pudieron mirar): estirar lo que falte.
-  return { ...c, linea_minima: c.linea_minima ? 0.25 : null, rebase_fondo: false, rebase_estirado: true, rebase_espejo: false };
+  return { ...c, linea_minima: c.linea_minima ? 0.25 : null, rebase_fondo: false, rebase_estirado: true, rebase_espejo: false, rebase_extendido: modoRebase() === "extendido" };
 }
 function bloqueCorrecciones(prefijo) {
   const c = correcciones();
@@ -112,6 +114,7 @@ function conectarCorrecciones(raiz, alCambiar) {
   }));
   $$("[data-rebase-modo]", raiz).forEach((el) => el.addEventListener("change", (e) => {
     e.stopPropagation();
+    preferir("rebaseModoElegido", true);
     preferir("rebaseModo", el.value);
     el.nextElementSibling.textContent = MODOS_REBASE.find(([v]) => v === el.value)[2];
     alCambiar();
@@ -385,6 +388,8 @@ function analizarArchivo(trabajo, archivo, formatosMixtos = false) {
   trabajo.mini = {};
   trabajo.fondos = {};
   trabajo.bordes = {};
+  trabajo.miniFondo = {};
+  trabajo.capaFondo = null;
   trabajo.pdfjs = null;
   trabajo.error = null;
   trabajo.cara = 0;
@@ -474,11 +479,41 @@ async function cargarPdfjs() {
   return pdfjsLib;
 }
 
+/**
+ * Capa de fondo de la página `i` (la que usa el motor para el rebase
+ * extendido), dibujada con transparencia para la vista previa. Queda en
+ * trabajo.miniFondo[i] = { imagen, vista } (vista en mm, coordenadas de la página).
+ */
+async function dibujarFondo(trabajo, i, lib) {
+  trabajo.miniFondo ??= {};
+  if (i in trabajo.miniFondo) return;
+  trabajo.miniFondo[i] = null;
+  try {
+    if (!trabajo.capaFondo) {
+      const r = motor.capa_fondo(trabajo.archivo.bytes);
+      trabajo.capaFondo = { hay: JSON.parse(r.informe), doc: lib.getDocument({ data: r.pdf }).promise };
+    }
+    if (!trabajo.capaFondo.hay[i]) return;
+    const doc = await trabajo.capaFondo.doc;
+    const pagina = await doc.getPage(i + 1);
+    const base = pagina.getViewport({ scale: 1, rotation: 0 });
+    const vp = pagina.getViewport({ scale: Math.min(2.5, 800 / Math.max(base.width, base.height)), rotation: 0 });
+    const lienzo = Object.assign(document.createElement("canvas"), { width: Math.floor(vp.width), height: Math.floor(vp.height) });
+    await pagina.render({ canvasContext: lienzo.getContext("2d"), viewport: vp, background: "rgba(0,0,0,0)" }).promise;
+    const mmpt = 25.4 / 72;
+    trabajo.miniFondo[i] = { imagen: lienzo.toDataURL("image/png"), vista: pagina.view.map((v) => v * mmpt) };
+  } catch (e) {
+    console.warn("No se pudo dibujar la capa de fondo:", e);
+  }
+}
+
 async function pedirMiniaturas(trabajo, indices, redibujar) {
   if (!trabajo.archivo) return;
   trabajo.mini ??= {};
   const faltan = [...new Set(indices)].filter((i) => !(i in trabajo.mini));
-  if (!faltan.length) return;
+  // La capa de fondo se pide también si se cambia a «extendido» con las miniaturas ya hechas.
+  const faltanFondo = modoRebase() === "extendido" ? [...new Set(indices)].filter((i) => !(i in (trabajo.miniFondo ?? {}))) : [];
+  if (!faltan.length && !faltanFondo.length) return;
   for (const i of faltan) trabajo.mini[i] = null; // pedida
   const archivo = trabajo.archivo;
   try {
@@ -503,6 +538,10 @@ async function pedirMiniaturas(trabajo, indices, redibujar) {
         trabajo.fondos[i] = fondosDeLienzo(ctx, lienzo.width, trabajo.info.paginas[i]);
         trabajo.bordes[i] = bordesDeLienzo(lienzo, trabajo.info.paginas[i]);
       } catch (e) { console.warn("No se pudo mirar el borde:", e); }
+    }
+    for (const i of faltanFondo) {
+      if (trabajo.archivo !== archivo) return;
+      await dibujarFondo(trabajo, i, lib);
     }
   } catch (e) {
     console.warn("Miniaturas no disponibles:", e);
@@ -631,7 +670,8 @@ async function medirFondos(trabajo, indices) {
 /** Modo de rebase de cada borde de una página (izquierda, abajo, derecha, arriba). */
 function modosPagina(trabajo, i) {
   const modo = modoRebase();
-  if (modo !== "auto") return [modo, modo, modo, modo];
+  // Con «extendido», las páginas sin capa de fondo usan el automático por borde.
+  if (modo !== "auto" && modo !== "extendido") return [modo, modo, modo, modo];
   return trabajo.bordes?.[i] ?? null;
 }
 
@@ -762,11 +802,35 @@ function svgCara(cara, maquina, opciones = {}) {
       };
       // El rebase de cada borde, igual que lo arma el motor (pdf::colocar_por_lados).
       const modos = opciones.modos?.(u.pagina);
-      if (modos) {
+      const capa = opciones.extendido ? opciones.miniFondo?.[u.pagina] : null;
+      const mas = (g, e = 0.15) => ({ x: g.x - e, y: g.y - e, ancho: g.ancho + 2 * e, alto: g.alto + 2 * e });
+      const c = u.corte, rr = u.recorte;
+      const pide = [c.x - rr.x, c.y - rr.y, rr.x + rr.ancho - c.x - c.ancho, rr.y + rr.alto - c.y - c.alto];
+      if (capa && pide.some((v) => v > 0.01)) {
+        // Igual que el motor (pdf::colocar_extendido): capa de fondo reflejada en
+        // cada franja, la capa tal cual en el anillo de rebase y la página encima.
+        const [fx0, fy0, fx1, fy1] = capa.vista;
+        const fondoCon = (mt, recorte, n) => {
+          const tt = multiplicar(multiplicar([1, 0, 0, -1, fx0, fy1], mt), [1, 0, 0, -1, 0, H]);
+          partes.push(`<clipPath id="${id}-f${n}">${recorte}</clipPath><g clip-path="url(#${id}-f${n})"><image href="${capa.imagen}" x="0" y="0" width="${fx1 - fx0}" height="${fy1 - fy0}" preserveAspectRatio="none" transform="matrix(${tt.map((v) => +v.toFixed(4)).join(" ")})"/></g>`);
+        };
+        const hace = pide.map((v) => v > 0.01);
+        const [pi, pb, pd, pa] = pide;
+        const der = c.x + c.ancho, arr = c.y + c.alto;
+        const espejo = [[-1, 0, 0, 1, 2 * c.x, 0], [1, 0, 0, -1, 0, 2 * c.y], [-1, 0, 0, 1, 2 * der, 0], [1, 0, 0, -1, 0, 2 * arr]];
+        const R = (x, yy, ancho, alto) => ({ x, y: yy, ancho, alto });
+        [[0, R(rr.x, c.y, pi, c.alto)], [1, R(c.x, rr.y, c.ancho, pb)], [2, R(der, c.y, pd, c.alto)], [3, R(c.x, arr, c.ancho, pa)]]
+          .forEach(([l, z]) => hace[l] && fondoCon(multiplicar(m, espejo[l]), r(mas(z)), `e${l}`));
+        [[0, 1, R(rr.x, rr.y, pi, pb)], [2, 1, R(der, rr.y, pd, pb)], [0, 3, R(rr.x, arr, pi, pa)], [2, 3, R(der, arr, pd, pa)]]
+          .forEach(([v, h, z]) => hace[v] && hace[h] && fondoCon(multiplicar(multiplicar(m, espejo[v]), espejo[h]), r(mas(z)), `c${v}${h}`));
+        const anillo = (z) => `M${z.x} ${y(z.y, z.alto)}h${z.ancho}v${z.alto}h${-z.ancho}z`;
+        fondoCon(m, `<path clip-rule="evenodd" d="${anillo(mas(rr))}${anillo(c)}"/>`, "a");
+        const pase = pide.map((v, l) => (hace[l] ? Math.min(v, 0.25) : 0));
+        imagenCon(m, mas({ x: c.x - pase[0], y: c.y - pase[1], ancho: c.ancho + pase[0] + pase[2], alto: c.alto + pase[1] + pase[3] }), "p");
+      } else if (modos) {
         const plan = rebasePorLados(u, pag, modos, opciones.fondos?.[u.pagina]);
-        // 0,15 mm de más en cada zona para que el navegador no deje filos
+        // 0,15 mm de más en cada zona (mas) para que el navegador no deje filos
         // blancos donde se tocan (entre franjas y entre piezas vecinas).
-        const mas = (g, e = 0.15) => ({ x: g.x - e, y: g.y - e, ancho: g.ancho + 2 * e, alto: g.alto + 2 * e });
         plan.bajo.forEach(({ zona, T }, n) => imagenCon(multiplicar(m, T), mas(zona), n));
         imagenCon(m, mas(plan.pagina), "p");
         for (const { zona, rgb } of plan.encima) partes.push(r(mas(zona), `fill="rgb(${rgb})"`));
@@ -822,7 +886,7 @@ function tarjetaVistaPrevia(trabajo, maquina, titulo, insignias = false) {
         <button class="boton boton-claro boton-chico" data-cara="${i + 1}" ${i === caras.length - 1 ? "disabled" : ""} aria-label="Pliego siguiente">→</button>
       </div>
     </div>
-    <div class="lienzo">${svgCara(caras[i], maquina, { info: trabajo.info, mini: trabajo.mini, insignias: insignias && guias, clave: i, guias, modos: (k) => modosPagina(trabajo, k), fondos: trabajo.fondos })}</div>
+    <div class="lienzo">${svgCara(caras[i], maquina, { info: trabajo.info, mini: trabajo.mini, insignias: insignias && guias, clave: i, guias, modos: (k) => modosPagina(trabajo, k), fondos: trabajo.fondos, extendido: modoRebase() === "extendido", miniFondo: trabajo.miniFondo })}</div>
     <div class="leyenda">${chips("vista-guias", [["pdf", "Como queda el PDF"], ["guias", "Con guías"]], guias ? "guias" : "pdf")}
       ${guias ? `<span><i style="border-color:var(--tinta)"></i>Corte</span><span><i style="border-color:#c03ac0;border-top-style:dashed"></i>Pliegue</span><span><i style="border-color:var(--gris);border-top-style:dashed"></i>Área imprimible</span><span><i style="border-color:var(--naranja)"></i>Pinza</span>` : ""}</div>
   </section>`;

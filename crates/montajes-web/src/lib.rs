@@ -1151,3 +1151,14 @@ pub fn calcular_lomo(paginas: u32, calibre_um: f64, calibre_portada_um: f64) -> 
         .map(|c| c.lomo_mm)
         .map_err(|e: Error| error(e))
 }
+
+// ───────────────────────── Capa de fondo ─────────────────────────
+
+/// PDF con solo la capa de fondo de cada página (para la vista previa del
+/// rebase extendido); el informe dice qué páginas tienen fondo.
+#[wasm_bindgen]
+pub fn capa_fondo(pdf: &[u8]) -> R<Resultado> {
+    licencia::exigir()?;
+    let (bytes, hay) = montajes_core::fondo::documento_fondos(pdf).map_err(error)?;
+    Ok(Resultado { pdf: bytes, informe: serde_json::to_string(&hay).map_err(error)? })
+}

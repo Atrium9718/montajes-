@@ -158,6 +158,22 @@ export function calcular_portada_json(peticion) {
 }
 
 /**
+ * PDF con solo la capa de fondo de cada página (para la vista previa del
+ * rebase extendido); el informe dice qué páginas tienen fondo.
+ * @param {Uint8Array} pdf
+ * @returns {Resultado}
+ */
+export function capa_fondo(pdf) {
+    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.capa_fondo(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Resultado.__wrap(ret[0]);
+}
+
+/**
  * Código de barras EAN-13 de un ISBN (barras en mm) para dibujarlo en la portada.
  * @param {string} isbn
  * @param {number} escala

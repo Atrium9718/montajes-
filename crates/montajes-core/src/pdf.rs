@@ -44,7 +44,7 @@ const PASE: f64 = 0.25;
 const ORILLA: f64 = 0.3;
 
 /// Límite de descompresión por página (protege de PDFs maliciosos).
-const LIMITE_CONTENIDO: usize = 512 * 1024 * 1024;
+pub(crate) const LIMITE_CONTENIDO: usize = 512 * 1024 * 1024;
 
 /// Caja PDF normalizada en puntos.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,7 +102,7 @@ impl PaginaFuente {
 
 /// PDF de entrada ya analizado.
 pub struct Fuente {
-    doc: Document,
+    pub(crate) doc: Document,
     pub paginas: Vec<PaginaFuente>,
 }
 
@@ -381,7 +381,7 @@ pub fn unir_documentos(docs: Vec<Document>) -> Resultado<Document> {
     Ok(base)
 }
 
-fn heredado(doc: &Document, pagina: ObjectId, clave: &[u8]) -> Option<Object> {
+pub(crate) fn heredado(doc: &Document, pagina: ObjectId, clave: &[u8]) -> Option<Object> {
     let mut actual = doc.get_dictionary(pagina).ok()?;
     for _ in 0..64 {
         if let Ok(valor) = actual.get(clave) {
@@ -461,6 +461,8 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
 
     // 1. Un Form XObject por cada página de entrada que se usa.
     let mut formas: BTreeMap<usize, ObjectId> = BTreeMap::new();
+    // Capa de fondo de cada página, para el rebase extendido.
+    let mut formas_fondo: BTreeMap<usize, Option<ObjectId>> = BTreeMap::new();
     let mut conteo = Conteo::default();
     let mut pendientes = Vec::new();
     let mut espejos = 0;
@@ -474,6 +476,10 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                 .ok_or_else(|| Error::Invalido(format!("la página {} no existe en la entrada", u.pagina + 1)))?;
             let id = crear_forma(&mut doc, p, &opciones.correcciones, &mut conteo, &mut pendientes)?;
             formas.insert(u.pagina, id);
+            if opciones.correcciones.rebase_extendido {
+                let fondo = crate::fondo::forma_fondo(&mut doc, p);
+                formas_fondo.insert(u.pagina, fondo);
+            }
         }
     }
     corregir_formas_anidadas(&mut doc, &opciones.correcciones, &mut conteo, pendientes);
@@ -529,7 +535,15 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                 let pos = ciclo.iter().position(|l| *l == lado_pliego).unwrap_or(0);
                 ciclo[(pos + 4 - (giro / 90) as usize % 4) % 4]
             };
-            if let Some(modos) = corr.modos.get(u.pagina).copied().flatten().filter(|_| pide.iter().any(|v| *v > 0.01))
+            let fondo_pagina = formas_fondo.get(&u.pagina).copied().flatten();
+            if let Some(fid) = fondo_pagina.filter(|_| pide.iter().any(|v| *v > 0.01)) {
+                // Rebase con la capa de fondo: la foto o el fondo siguen más allá del corte.
+                espejos += 1;
+                let nombre_fondo = format!("F{}", u.pagina + 1);
+                xobjetos.set(nombre_fondo.as_bytes(), Object::Reference(fid));
+                colocar_extendido(&mut contenido, c, r, pide, &m, &nombre, &nombre_fondo);
+            } else if let Some(modos) =
+                corr.modos.get(u.pagina).copied().flatten().filter(|_| pide.iter().any(|v| *v > 0.01))
             {
                 // Rebase decidido por borde (lo elige la app mirando la página).
                 espejos += 1;
@@ -669,7 +683,9 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
     if espejos > 0 {
         informe.avisos.push(format!(
             "corregido: rebase generado {} en {espejos} ubicaciones sin rebase suficiente",
-            if opciones.correcciones.rebase_fondo {
+            if opciones.correcciones.rebase_extendido {
+                "con la capa de fondo de la página"
+            } else if opciones.correcciones.rebase_fondo {
                 "solo con el fondo"
             } else if opciones.correcciones.rebase_estirado {
                 "estirando el fondo de la orilla"
@@ -980,6 +996,75 @@ pub fn documento_plantilla_portada(c: &Portada, titulo: &str, nota: &str, isbn: 
 }
 
 /// Dibuja la página `nombre` recortada a `zona` (mm) con la matriz `m` (pt).
+/// Coloca una página con el rebase hecho con su capa de fondo (`fondo`, ver
+/// [`crate::fondo`]):
+/// 1. en cada franja de rebase, la capa de fondo reflejada sobre el borde
+///    (rellena lo que el fondo no alcanza, sin textos ni logos);
+/// 2. encima, en todo el anillo de rebase, la capa de fondo tal cual: donde la
+///    foto o el fondo siguen más allá del corte, se ve su continuación real;
+/// 3. la página encima, recortada al corte con un pase mínimo hacia el rebase.
+fn colocar_extendido(
+    contenido: &mut String,
+    c: Rect,
+    r: Rect,
+    pide: [f64; 4],
+    m: &[f64; 6],
+    pagina: &str,
+    fondo: &str,
+) {
+    let hace = pide.map(|v| v > 0.01);
+    let (x0, y0, x1, y1) = (mm_a_pt(c.x), mm_a_pt(c.y), mm_a_pt(c.derecha()), mm_a_pt(c.arriba()));
+    let espejo = |l: usize| -> [f64; 6] {
+        match l {
+            0 => [-1.0, 0.0, 0.0, 1.0, 2.0 * x0, 0.0],
+            2 => [-1.0, 0.0, 0.0, 1.0, 2.0 * x1, 0.0],
+            1 => [1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * y0],
+            _ => [1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * y1],
+        }
+    };
+    let [pi, pb, pd, pa] = pide;
+    let franjas = [
+        (0, Rect::new(r.x, c.y, pi, c.alto)),
+        (2, Rect::new(c.derecha(), c.y, pd, c.alto)),
+        (1, Rect::new(c.x, r.y, c.ancho, pb)),
+        (3, Rect::new(c.x, c.arriba(), c.ancho, pa)),
+    ];
+    for (l, zona) in franjas {
+        if hace[l] {
+            colocar(contenido, zona, &multiplicar(m, &espejo(l)), fondo);
+        }
+    }
+    for (v, h, zona) in [
+        (0, 1, Rect::new(r.x, r.y, pi, pb)),
+        (2, 1, Rect::new(c.derecha(), r.y, pd, pb)),
+        (0, 3, Rect::new(r.x, c.arriba(), pi, pa)),
+        (2, 3, Rect::new(c.derecha(), c.arriba(), pd, pa)),
+    ] {
+        if hace[v] && hace[h] {
+            colocar(contenido, zona, &multiplicar(&multiplicar(m, &espejo(v)), &espejo(h)), fondo);
+        }
+    }
+    // El anillo de rebase: el rectángulo de rebase menos el de corte (par-impar).
+    let caja =
+        |z: Rect| format!("{} {} {} {} re ", n(mm_a_pt(z.x)), n(mm_a_pt(z.y)), n(mm_a_pt(z.ancho)), n(mm_a_pt(z.alto)));
+    contenido.push_str(&format!(
+        "q {}{}W* n {} {} {} {} {} {} cm /{} Do Q\n",
+        caja(r),
+        caja(c),
+        n(m[0]),
+        n(m[1]),
+        n(m[2]),
+        n(m[3]),
+        n(m[4]),
+        n(m[5]),
+        fondo
+    ));
+    // La página encima, pasada un poco del corte: el filo que suavizan los
+    // visores queda en el rebase, no sobre la pieza.
+    let pase: [f64; 4] = std::array::from_fn(|l| if hace[l] { pide[l].min(PASE) } else { 0.0 });
+    colocar(contenido, c.expandir(pase[0], pase[1], pase[2], pase[3]), m, pagina);
+}
+
 /// Coloca una página con el rebase de cada borde hecho a su manera (lados en
 /// el pliego: izquierda, abajo, derecha, arriba):
 /// 1. franjas en espejo o estiradas, debajo de la página;
