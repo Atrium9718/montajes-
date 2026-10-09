@@ -2047,8 +2047,11 @@ function vistaLibro(main) {
             <select id="lb-papel"><option value="">Sin papel (no calcula creep ni lomo)</option>${papeles.map((p) => `<option value="${esc(p.id)}" ${p.id === papelElegido ? "selected" : ""}>${esc(p.nombre)} · ${p.calibre_um} µm</option>`).join("")}</select>
             ${papeles.length ? "" : `<small><a href="#catalogos">Agrega papeles</a> para calcular el lomo y el creep.</small>`}
           </label>
-          <div class="campo"><span>Páginas por firma</span>${chips("firma", [["auto", "Auto"], ["4", "4"], ["8", "8"], ["16", "16"], ["32", "32"], ["64", "64"]], o.firma)}</div>
-          <label class="campo"><span>Cuadernillos a mano (opcional)</span><input type="text" id="lb-cuadernillos" value="${esc(o.cuadernillos || "")}" placeholder="Ej.: 16,16,16,8" autocomplete="off"><small>${textoCuadernillos(t)}</small></label>
+          <div class="campo"><span>Cuadernillos</span>${chips("firma", [["auto", "Automático"], ["4", "De 4"], ["8", "De 8"], ["16", "De 16"], ["32", "De 32"], ["64", "De 64"]], o.cuadernillos ? "" : o.firma)}
+            <small id="lb-reparto">Automático: los más grandes que quepan en el pliego y, al final, los más chicos que cuadren.</small>
+            <details class="avanzado"${o.cuadernillos ? " open" : ""}><summary>Otra combinación</summary>
+              <label class="campo"><span>Cuadernillos en orden</span><input type="text" id="lb-cuadernillos" value="${esc(o.cuadernillos || "")}" placeholder="Ej.: 32 16 16" autocomplete="off"><small>${textoCuadernillos(t)}</small></label>
+            </details></div>
           ${campoEscala("lb", o, t.info ? formatoTripa(t) : null)}
           <div class="campo"><span>Orientación de las páginas en el pliego</span>${chips("orientacionPaginas", [["auto", "Automática (la que más rinda)"], ["normal", "Derechas"], ["girada", "Giradas 90°"]], o.orientacionPaginas || "auto")}<div id="lb-orientaciones" class="tenue" style="font-size:13px"></div></div>
           <div class="campo"><span>Volteo del retiro</span>${chips("volteo", [["maquina", `Según la máquina${maquinaElegida("lb-maquina") ? ` (${maquinaElegida("lb-maquina").volteo === "cabeza" ? "de cabeza" : "de lado"})` : ""}`], ["lateral", "De lado"], ["cabeza", "De cabeza"]], o.volteo || "maquina")}<small>De lado: se voltea conservando la pinza. De cabeza: la cola pasa a ser pinza (pinza y cola se igualan).</small></div>
@@ -2097,7 +2100,13 @@ function vistaLibro(main) {
     if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaLibro(main); return; }
     calcularLibro();
   }));
-  conectarChips(main, (n, v) => { o[n] = v; t.cara = 0; if (n === "encuadernacion" || n === "armado") vistaLibro(main); else calcularLibro(); });
+  conectarChips(main, (n, v) => {
+    o[n] = v;
+    t.cara = 0;
+    // Elegir un tamaño de cuadernillo deja de lado la combinación escrita a mano.
+    if (n === "firma") o.cuadernillos = "";
+    if (n === "encuadernacion" || n === "armado" || n === "firma") vistaLibro(main); else calcularLibro();
+  });
   calcularLibro();
 }
 
@@ -2159,11 +2168,30 @@ function calcularLibro() {
       const porPliego = Math.max(...Object.values(p.firmas.reduce((a, f) => ({ ...a, [f.pliego]: (a[f.pliego] || 0) + 1 }), {})));
       explicacion += ` Hojas sueltas: <span class="resaltado">${porPliego} hojas distintas por pliego</span> (${porPliego * 2} páginas por cara), ${hojas} ${hojas === 1 ? "pliego" : "pliegos"} por ejemplar. Se corta el pliego y cada hoja se dobla y se anida en orden.`;
     }
+    // Por qué hay páginas de cabeza.
+    const volteo = (t.op.volteo || "maquina") === "maquina" ? maquina?.volteo : t.op.volteo;
+    if (armadoDe(t.op, maquina) !== "sueltas" && p.firmas.some((f) => f.paginas >= 8)) {
+      explicacion += ` En cada firma <b>la mitad de las páginas va de cabeza</b> (cabeza con cabeza): es lo normal, al doblar el pliego quedan al derecho.`;
+    }
+    if (volteo === "cabeza") {
+      explicacion += ` <b>El retiro va girado de cabeza</b> porque el volteo es «de cabeza»${(t.op.volteo || "maquina") === "maquina" ? " (así está la máquina en el catálogo)" : ""}; si en tu máquina el papel se voltea de lado, cambia «Volteo del retiro» a «De lado».`;
+    }
     const multiples = p.firmas.filter((f) => f.copias > 1);
     if (multiples.length) {
       const tr = multiples.some((f) => f.tira_retira);
       explicacion += ` ${multiples.length === p.firmas.length ? "Cada pliego" : `En ${multiples.length} ${multiples.length === 1 ? "firma" : "firmas"}, cada pliego`} da <span class="resaltado">${Math.max(...multiples.map((f) => f.copias))} firmas${tr ? " en tira y retira" : ""}</span>: ${p.juegos_planchas} juegos de planchas y ${mm(p.pliegos_por_ejemplar, 2)} pliegos por ejemplar.`;
     }
+  }
+  // Reparto de cuadernillos que salió, debajo de la opción.
+  const reparto = $("#lb-reparto");
+  if (reparto) {
+    const lista = p?.firmas.map((f) => f.paginas) || [];
+    const resumen = Object.entries(lista.reduce((m, n) => ({ ...m, [n]: (m[n] || 0) + 1 }), {})).sort((a, b) => b[0] - a[0]).map(([n, k]) => `${k} de ${n}`).join(" + ");
+    const fija = t.op.firma !== "auto" && !t.op.cuadernillos ? Number(t.op.firma) : 0;
+    const sueltas = armadoDe(t.op, maquina) === "sueltas";
+    reparto.innerHTML = p
+      ? `${sueltas ? "Con hojas sueltas (Armado) cada hoja es un cuadernillo de 4. " : ""}Salen <b>${resumen}</b> = ${p.paginas_libro} páginas${p.blancas ? ` (${p.blancas} en blanco al final${(p.paginas_libro - p.blancas) % 4 ? ": la tripa no es múltiplo de 4" : ""})` : ", exactas"}.`
+      : fija && error ? `Los cuadernillos de ${fija} no caben en este pliego: elige uno más chico o «Automático».` : reparto.innerHTML;
   }
   const tercera = !p ? "" : t.op.encuadernacion === "caballete"
     ? `<div class="metrica"><b>${mm(p.creep_max, 2)}</b><span>mm de creep (hoja central)</span></div>`
