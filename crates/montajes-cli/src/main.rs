@@ -303,6 +303,8 @@ enum AprovechamientoArg {
     Una,
     Repetir,
     TiraRetira,
+    /// Firmas distintas en el mismo pliego (hojas sueltas: se corta y se anida).
+    Combinar,
 }
 
 #[derive(Args)]
@@ -830,6 +832,7 @@ fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
             AprovechamientoArg::Una => Aprovechamiento::Una,
             AprovechamientoArg::Repetir => Aprovechamiento::Repetir,
             AprovechamientoArg::TiraRetira => Aprovechamiento::TiraRetira,
+            AprovechamientoArg::Combinar => Aprovechamiento::Combinar,
         },
         cuadernillos: a.cuadernillos.clone(),
         mapa: vec![],

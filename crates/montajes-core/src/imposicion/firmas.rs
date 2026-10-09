@@ -48,6 +48,10 @@ pub enum Aprovechamiento {
     Repetir,
     /// Tiro y retiro lado a lado con la misma plancha (work & turn).
     TiraRetira,
+    /// Firmas distintas en el mismo pliego (las siguientes del libro): se
+    /// imprime, se corta y cada hoja se pliega aparte. Con firmas de 4 pp es
+    /// el armado de hojas sueltas anidadas típico de la impresión digital.
+    Combinar,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +110,9 @@ pub struct Firma {
     pub copias: u32,
     /// Tiro y retiro en la misma cara: un solo juego de planchas.
     pub tira_retira: bool,
+    /// Pliego impreso en el que va (las firmas combinadas lo comparten).
+    #[serde(default)]
+    pub pliego: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -289,7 +296,7 @@ fn montaje(g: &Grilla, p: &ParametrosLibro, girada: bool) -> (Montaje, Option<St
     let puede_tr = !girada && columnas >= 2 && p.volteo == Volteo::Lateral;
     match p.aprovechamiento {
         Aprovechamiento::Una => (una, None),
-        Aprovechamiento::Repetir => (repetir, None),
+        Aprovechamiento::Repetir | Aprovechamiento::Combinar => (repetir, None),
         Aprovechamiento::TiraRetira if puede_tr => (pares, None),
         Aprovechamiento::TiraRetira if p.volteo == Volteo::Cabeza => (
             repetir,
@@ -441,29 +448,56 @@ pub fn planificar(original: &ParametrosLibro) -> Resultado<PlanLibro> {
     let mut caras = Vec::new();
     let mut pliegos_por_ejemplar = 0.0;
     let mut juegos_planchas = 0;
-    for (i, (n, paginas_libro_firma)) in tamanos.iter().zip(numeracion).enumerate() {
+    let numeradas: Vec<(u32, u32, Vec<u32>)> =
+        tamanos.iter().zip(numeracion).enumerate().map(|(i, (n, pl))| (i as u32 + 1, *n, pl)).collect();
+    let combinar = p.aprovechamiento == Aprovechamiento::Combinar;
+    let mut i = 0;
+    let mut pliego = 0;
+    while i < numeradas.len() {
+        let (numero, n, _) = &numeradas[i];
         let (_, esquema, girada) = esquemas
             .iter()
             .find(|(t, _, _)| t == n)
             .ok_or_else(|| Error::NoCabe(format!("firma de {n} páginas de {} en pliego {}", p.pagina, p.pliego)))?;
-        let numero = i as u32 + 1;
         let (m, aviso) = montaje(&grilla(esquema, p), p, *girada);
         if let Some(a) = aviso
             && !avisos.contains(&a)
         {
             avisos.push(a);
         }
-        caras.extend(caras_firma(p, esquema, &m, &paginas_libro_firma, numero, &creep));
-        pliegos_por_ejemplar += 1.0 / f64::from(m.copias());
+        pliego += 1;
+        // Combinadas: las firmas siguientes del mismo tamaño llenan las demás posiciones.
+        let cuantas = if combinar {
+            numeradas[i..].iter().take(m.copias() as usize).take_while(|(_, t, _)| t == n).count()
+        } else {
+            1
+        };
+        let grupo = &numeradas[i..i + cuantas];
+        let copias: Vec<Option<(u32, &[u32])>> = if combinar {
+            grupo.iter().map(|(num, _, pl)| Some((*num, pl.as_slice()))).collect()
+        } else {
+            vec![Some((*numero, numeradas[i].2.as_slice())); m.copias() as usize]
+        };
+        let nombre = if cuantas > 1 {
+            format!("Pliego {pliego} · firmas {}–{}", grupo[0].0, grupo[cuantas - 1].0)
+        } else {
+            format!("Firma {numero}")
+        };
+        caras.extend(caras_firma(p, esquema, &m, &copias, &nombre, &creep));
+        pliegos_por_ejemplar += if combinar { 1.0 } else { 1.0 / f64::from(m.copias()) };
         juegos_planchas += if m.tira_retira { 1 } else { 2 };
-        firmas.push(Firma {
-            numero,
-            paginas: *n,
-            paginas_libro: paginas_libro_firma,
-            girada: *girada,
-            copias: m.copias(),
-            tira_retira: m.tira_retira,
-        });
+        for (num, tam, pl) in grupo {
+            firmas.push(Firma {
+                numero: *num,
+                paginas: *tam,
+                paginas_libro: pl.clone(),
+                girada: *girada,
+                copias: if combinar { 1 } else { m.copias() },
+                tira_retira: m.tira_retira,
+                pliego,
+            });
+        }
+        i += cuantas;
     }
     Ok(PlanLibro { paginas_libro, blancas, firmas, caras, creep_max, pliegos_por_ejemplar, juegos_planchas, avisos })
 }
@@ -472,8 +506,8 @@ fn caras_firma(
     p: &ParametrosLibro,
     e: &Esquema,
     m: &Montaje,
-    paginas_libro: &[u32],
-    numero: u32,
+    copias: &[Option<(u32, &[u32])>],
+    nombre: &str,
     creep: &dyn Fn(u32) -> f64,
 ) -> Vec<Cara> {
     let g = grilla(e, p);
@@ -500,7 +534,11 @@ fn caras_firma(
     }
     let mut piezas = Vec::with_capacity(e.posiciones.len() * origenes.len());
     let mut alzados = Vec::new();
-    for &(x0, y0) in &origenes {
+    for (indice, &(x0, y0)) in origenes.iter().enumerate() {
+        // Qué firma va en esta posición (en combinadas, cada una distinta).
+        let Some((numero, paginas_libro)) = copias.get(indice).copied().flatten() else {
+            continue;
+        };
         let celda_fisica = |columna: usize, fila: usize| {
             Rect::new(
                 x0 + g.anchos[..columna].iter().sum::<f64>(),
@@ -605,12 +643,9 @@ fn caras_firma(
         Cara { nombre, pliego: p.pliego, ubicaciones, marcas, cajas: None }
     };
     if m.tira_retira {
-        vec![armar(&[Lado::Tiro, Lado::Retiro], format!("Firma {numero} · tira y retira"))]
+        vec![armar(&[Lado::Tiro, Lado::Retiro], format!("{nombre} · tira y retira"))]
     } else {
-        vec![
-            armar(&[Lado::Tiro], format!("Firma {numero} tiro")),
-            armar(&[Lado::Retiro], format!("Firma {numero} retiro")),
-        ]
+        vec![armar(&[Lado::Tiro], format!("{nombre} tiro")), armar(&[Lado::Retiro], format!("{nombre} retiro"))]
     }
 }
 
@@ -789,6 +824,34 @@ mod pruebas {
         // En automático gana la que da más firmas por pliego.
         let auto = planificar(&p).unwrap();
         assert_eq!(auto.firmas[0].copias, derecha.firmas[0].copias.max(girada.firmas[0].copias));
+    }
+
+    #[test]
+    fn hojas_sueltas_anidadas_combinan_firmas_distintas_en_el_pliego() {
+        // Revista A5 de 16 pp a caballete en hojas de 4 pp: dos hojas por pliego.
+        let mut p = libro(16, Encuadernacion::Caballete);
+        p.firma = Some(4);
+        p.aprovechamiento = Aprovechamiento::Combinar;
+        p.pliego = Tamano::new(330.0, 480.0);
+        p.margenes = Margenes { pinza: 4.0, cola: 4.0, lateral: 4.0 };
+        let plan = planificar(&p).unwrap();
+        assert_eq!(plan.firmas.len(), 4);
+        assert!((plan.pliegos_por_ejemplar - 2.0).abs() < 1e-9);
+        assert_eq!(plan.caras.len(), 4);
+        let paginas = |c: &Cara| {
+            let mut v: Vec<usize> = c.ubicaciones.iter().map(|u| u.pagina + 1).collect();
+            v.sort();
+            v
+        };
+        // Pliego 1: hojas 1 (16|1 y 2|15) y 2 (14|3 y 4|13).
+        let par = |a: usize| {
+            let mut v = vec![paginas(&plan.caras[a]), paginas(&plan.caras[a + 1])];
+            v.sort();
+            v
+        };
+        assert_eq!(par(0), [vec![1, 3, 14, 16], vec![2, 4, 13, 15]]);
+        assert_eq!(par(2), [vec![5, 7, 10, 12], vec![6, 8, 9, 11]]);
+        assert_eq!(plan.firmas.iter().map(|f| f.pliego).collect::<Vec<_>>(), [1, 1, 2, 2]);
     }
 
     #[test]

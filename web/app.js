@@ -1320,7 +1320,13 @@ function tirajesDe(tipo, c, maquina) {
     const plan = estado.libro.plan?.plan;
     if (!plan) return null;
     const retiro = c.retiro ?? maquina.colores;
-    return plan.firmas.map((f) => ({ nombre: `Firma ${f.numero}`, pliegos_netos: Math.ceil(c.cantidad / f.copias), colores_tiro: tiro, colores_retiro: retiro, tira_retira: f.tira_retira }));
+    // Las firmas combinadas comparten pliego: un tiraje por pliego impreso.
+    const grupos = new Map();
+    for (const f of plan.firmas) {
+      const k = f.pliego || f.numero;
+      if (!grupos.has(k)) grupos.set(k, { nombre: f.pliego && plan.firmas.filter((x) => x.pliego === f.pliego).length > 1 ? `Pliego ${k}` : `Firma ${f.numero}`, pliegos_netos: Math.ceil(c.cantidad / f.copias), colores_tiro: tiro, colores_retiro: retiro, tira_retira: f.tira_retira });
+    }
+    return [...grupos.values()];
   }
   const t = estado.piezas;
   if (!t.plan) return null;
@@ -1459,6 +1465,8 @@ function vistaLibro(main) {
           ${campoEscala("lb", o, t.info ? formatoTripa(t) : null)}
           <div class="campo"><span>Orientación de las páginas en el pliego</span>${chips("orientacionPaginas", [["auto", "Automática (la que más rinda)"], ["normal", "Derechas"], ["girada", "Giradas 90°"]], o.orientacionPaginas || "auto")}<div id="lb-orientaciones" class="tenue" style="font-size:13px"></div></div>
           <div class="campo"><span>Volteo del retiro</span>${chips("volteo", [["maquina", `Según la máquina${maquinaElegida("lb-maquina") ? ` (${maquinaElegida("lb-maquina").volteo === "cabeza" ? "de cabeza" : "de lado"})` : ""}`], ["lateral", "De lado"], ["cabeza", "De cabeza"]], o.volteo || "maquina")}<small>De lado: se voltea conservando la pinza. De cabeza: la cola pasa a ser pinza (pinza y cola se igualan).</small></div>
+          <div class="campo"><span>Armado</span>${chips("armado", [["auto", "Automático"], ["plegado", "Pliegos plegados (8, 16, 32 pp)"], ["sueltas", "Hojas sueltas de 4 pp (corte y anidado)"]], o.armado || "auto")}
+            <small>${armadoDe(o, maquinaElegida("lb-maquina")) === "sueltas" ? "Cada hoja lleva 4 páginas (2 por cara) y en el pliego van hojas distintas, en orden: se imprime, se corta, se dobla cada hoja y se anidan." : "Cada firma se pliega entera (8, 16 o 32 páginas) y las firmas se anidan o se alzan."}${(o.armado || "auto") === "auto" ? " Automático: hojas sueltas en digital a caballete; plegado en lo demás." : ""}</small></div>
           <div class="campo"><span>Firmas por pliego</span>${chips("aprovechamiento", [["auto", "Auto"], ["una", "Una"], ["repetir", "Repetir"], ["tira_retira", "Tira y retira"]], o.aprovechamiento)}<small>Auto monta en tira y retira (una sola plancha para las dos caras) cuando la firma cabe dos veces lado a lado.</small></div>
           <details class="avanzado"><summary>Márgenes, lectura y marcas</summary>
             <div class="paso">
@@ -1501,8 +1509,15 @@ function vistaLibro(main) {
     if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaLibro(main); return; }
     calcularLibro();
   }));
-  conectarChips(main, (n, v) => { o[n] = v; t.cara = 0; if (n === "encuadernacion") vistaLibro(main); else calcularLibro(); });
+  conectarChips(main, (n, v) => { o[n] = v; t.cara = 0; if (n === "encuadernacion" || n === "armado") vistaLibro(main); else calcularLibro(); });
   calcularLibro();
+}
+
+/** Cómo se arma el libro: plegado (firmas grandes) u hojas sueltas de 4 pp combinadas. */
+function armadoDe(o, maquina) {
+  const a = o.armado || "auto";
+  if (a !== "auto") return a;
+  return maquina?.tipo === "digital" && o.encuadernacion === "caballete" ? "sueltas" : "plegado";
 }
 
 function peticionLibro(maquina, info) {
@@ -1512,10 +1527,10 @@ function peticionLibro(maquina, info) {
   const enOrden = tripa.length === info.paginas.length;
   return {
     maquina, formato: formatoTripa(estado.libro), paginas: tripa.length, encuadernacion: o.encuadernacion,
-    mapa: enOrden ? [] : tripa, cuadernillos: cuadernillosDe(o),
-    firma: o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
+    mapa: enOrden ? [] : tripa, cuadernillos: armadoDe(o, maquina) === "sueltas" ? [] : cuadernillosDe(o),
+    firma: armadoDe(o, maquina) === "sueltas" ? 4 : o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
-    derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: o.aprovechamiento || "auto",
+    derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: armadoDe(o, maquina) === "sueltas" ? "combinar" : o.aprovechamiento || "auto",
     volteo: !o.volteo || o.volteo === "maquina" ? null : o.volteo,
     pliego: pliegoDe(o, maquina), orientacion_papel: orientacionPapel(o), orientacion_paginas: o.orientacionPaginas || "auto", escala: escalaDe(o),
     titulo: base(estado.libro.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
@@ -1551,6 +1566,11 @@ function calcularLibro() {
     if (esc0 !== 1) { const f0 = formatoTripa(t); explicacion += `Arte al <span class="resaltado">${Math.round(esc0 * 100)} %</span>: cada página queda de ${cm(f0.ancho * esc0)} × ${cm(f0.alto * esc0)} cm. `; }
     explicacion += o.encuadernacion === "caballete" ? "Las firmas van anidadas una dentro de otra." : "Las firmas se alzan una tras otra" + (o.encuadernacion === "lomo" ? `, con ${mm(o.fresado)} mm de fresado en el lomo.` : ".");
     if (p.blancas) explicacion += ` Se agregan <b>${p.blancas}</b> páginas en blanco al final.`;
+    if (armadoDe(t.op, maquina) === "sueltas") {
+      const hojas = Math.max(...p.firmas.map((f) => f.pliego || 1));
+      const porPliego = Math.max(...Object.values(p.firmas.reduce((a, f) => ({ ...a, [f.pliego]: (a[f.pliego] || 0) + 1 }), {})));
+      explicacion += ` Hojas sueltas: <span class="resaltado">${porPliego} hojas distintas por pliego</span> (${porPliego * 2} páginas por cara), ${hojas} ${hojas === 1 ? "pliego" : "pliegos"} por ejemplar. Se corta el pliego y cada hoja se dobla y se anida en orden.`;
+    }
     const multiples = p.firmas.filter((f) => f.copias > 1);
     if (multiples.length) {
       const tr = multiples.some((f) => f.tira_retira);
