@@ -78,11 +78,12 @@ const CORRECCIONES = [
   ["sobreimprimir_negro", "Sobreimprimir el negro 100 %", "Evita filetes blancos si el registro se mueve."],
   ["quitar_sobreimpresion_blanco", "Quitar sobreimpresión de blancos", "Si no, los objetos blancos desaparecen al imprimir."],
   ["linea_minima", "Engrosar líneas finas a 0,25 pt", "Las más finas pueden no verse."],
+  ["rebase_fondo", "Rebase solo con el color del fondo", "Ignora lo que el PDF trae fuera del corte (textos, QR, logos que se salen) y rellena el rebase con el color del fondo junto a cada borde."],
   ["rebase_estirado", "Completar el rebase si falta, solo con el fondo", "Si la página trae menos de 3 mm, estira la orilla de la página: sigue el fondo sin repetir textos ni logos."],
   ["rebase_espejo", "Completar el rebase en espejo (en vez de estirar)", "Refleja los 3 mm del borde: puede repetir elementos cercanos al corte."],
 ];
 function correcciones() {
-  const c = { sobreimprimir_negro: true, quitar_sobreimpresion_blanco: true, linea_minima: true, rebase_estirado: true, rebase_espejo: false, ...(estado.preferencias.correcciones || {}) };
+  const c = { sobreimprimir_negro: true, quitar_sobreimpresion_blanco: true, linea_minima: true, rebase_fondo: true, rebase_estirado: true, rebase_espejo: false, ...(estado.preferencias.correcciones || {}) };
   return { ...c, linea_minima: c.linea_minima ? 0.25 : null, rebase_estirado: c.rebase_estirado && !c.rebase_espejo };
 }
 function bloqueCorrecciones(prefijo) {
@@ -366,6 +367,7 @@ function tarjetaArchivo(archivo, info, idQuitar) {
 function analizarArchivo(trabajo, archivo, formatosMixtos = false) {
   trabajo.archivo = archivo;
   trabajo.mini = {};
+  trabajo.fondos = {};
   trabajo.pdfjs = null;
   trabajo.error = null;
   trabajo.cara = 0;
@@ -481,6 +483,69 @@ async function pedirMiniaturas(trabajo, indices, redibujar) {
     for (const i of faltan) trabajo.mini[i] = false;
   }
   if (trabajo.archivo === archivo) redibujar();
+}
+
+/**
+ * Color del fondo junto a cada borde de corte de las páginas (izquierda,
+ * abajo, derecha, arriba), en RGB 0–1: el color más frecuente en una franja
+ * de 0,5 a 2,5 mm hacia adentro del corte. Sirve para el rebase «solo fondo».
+ */
+async function medirFondos(trabajo, indices) {
+  trabajo.fondos ??= {};
+  const faltan = [...new Set(indices)].filter((i) => !(i in trabajo.fondos));
+  if (faltan.length) {
+    const lib = await cargarPdfjs();
+    trabajo.pdfjs ??= lib.getDocument({ data: trabajo.archivo.bytes.slice() }).promise;
+    const doc = await trabajo.pdfjs;
+    for (const i of faltan) {
+      const info = trabajo.info.paginas[i];
+      const pagina = await doc.getPage(i + 1);
+      const base = pagina.getViewport({ scale: 1, rotation: 0 });
+      const escala = Math.min(4, 900 / Math.max(base.width, base.height));
+      const vp = pagina.getViewport({ scale: escala, rotation: 0 });
+      const lienzo = Object.assign(document.createElement("canvas"), { width: Math.ceil(vp.width), height: Math.ceil(vp.height) });
+      const ctx = lienzo.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, lienzo.width, lienzo.height);
+      await pagina.render({ canvasContext: ctx, viewport: vp }).promise;
+      const [vx0, , , vy1] = info.vista;
+      const pxmm = lienzo.width / (info.vista[2] - info.vista[0]);
+      const X = (xmm) => Math.round((xmm - vx0) * pxmm), Y = (ymm) => Math.round((vy1 - ymm) * pxmm);
+      const [cx0, cy0, cx1, cy1] = info.corte;
+      const a = 0.5, b = 2.5;
+      const franjas = [
+        [X(cx0 + a), Y(cy1), X(cx0 + b), Y(cy0)], // izquierda
+        [X(cx0), Y(cy0 + b), X(cx1), Y(cy0 + a)], // abajo
+        [X(cx1 - b), Y(cy1), X(cx1 - a), Y(cy0)], // derecha
+        [X(cx0), Y(cy1 - a), X(cx1), Y(cy1 - b)], // arriba
+      ];
+      trabajo.fondos[i] = franjas.map(([x0, y0, x1, y1]) => {
+        const w = Math.max(1, x1 - x0), h = Math.max(1, y1 - y0);
+        const datos = ctx.getImageData(Math.max(0, x0), Math.max(0, y0), w, h).data;
+        const cubetas = new Map();
+        for (let k = 0; k < datos.length; k += 4) {
+          const clave = (datos[k] >> 4) * 256 + (datos[k + 1] >> 4) * 16 + (datos[k + 2] >> 4);
+          const c = cubetas.get(clave) || [0, 0, 0, 0];
+          c[0] += datos[k]; c[1] += datos[k + 1]; c[2] += datos[k + 2]; c[3]++;
+          cubetas.set(clave, c);
+        }
+        const [r, g, bb, n] = [...cubetas.values()].sort((p, q) => q[3] - p[3])[0] || [255, 255, 255, 1];
+        return [r / n / 255, g / n / 255, bb / n / 255];
+      });
+    }
+  }
+  const lista = [];
+  for (const i of indices) lista[i] = trabajo.fondos[i];
+  return Array.from({ length: trabajo.info.paginas.length }, (_, i) => lista[i] ?? null);
+}
+
+/** Correcciones para generar: con los colores de fondo si el rebase va «solo fondo». */
+async function correccionesParaGenerar(trabajo, indices) {
+  const c = correcciones();
+  if (c.rebase_fondo && trabajo.archivo && trabajo.info) {
+    try { c.fondos = await medirFondos(trabajo, indices); } catch (e) { console.warn("No se pudo medir el fondo:", e); c.rebase_fondo = false; }
+  }
+  return c;
 }
 
 /** a × b: primero a, luego b (convención PDF). */
@@ -1030,8 +1095,8 @@ function calcularPiezas() {
     try {
       const icc = (await iccDB.leer(maquina.id)) || new Uint8Array();
       const r = combinado
-        ? motor.generar_combinado(t.archivo.bytes, JSON.stringify(peticionCombinado(maquina, t.info)), icc)
-        : motor.generar_nup(t.archivo.bytes, JSON.stringify(peticionPiezas(maquina, t.info)), icc);
+        ? motor.generar_combinado(t.archivo.bytes, JSON.stringify({ ...peticionCombinado(maquina, t.info), correcciones: await correccionesParaGenerar(t, t.info.paginas.map((_, i) => i)) }), icc)
+        : motor.generar_nup(t.archivo.bytes, JSON.stringify({ ...peticionPiezas(maquina, t.info), correcciones: await correccionesParaGenerar(t, t.info.paginas.map((_, i) => i)) }), icc);
       descargar(r.pdf, `${base(t.archivo.nombre)}-${combinado ? "combinado" : "montaje"}.pdf`);
       const inf = JSON.parse(r.informe);
       const corregidos = inf.avisos.filter((a) => a.startsWith("corregido")).length;
@@ -1198,7 +1263,7 @@ function peticionCaratula(maquina, montar) {
     calibre_um: tripaPapel?.calibre_um ?? null, calibre_portada_um: cubierta?.calibre_um ?? null,
     tipo: o.tapaDura ? { tapa_dura: { carton: 2.5, escuadra: 3, vuelta: 15, bisagra: 8 } } : { rustica: { solapa: num(o.solapaCaratula, 0) } },
     rebase: o.rebase, derecha_a_izquierda: o.rtl, marcas: true,
-    titulo: `${base(t.archivo?.nombre)} carátula`, fecha: ahora(), maquina, correcciones: correcciones(),
+    titulo: `${base(t.archivo?.nombre)} carátula`, fecha: ahora(), maquina, correcciones: { ...correcciones(), rebase_fondo: false },
     asignacion, montar,
   };
 }
@@ -1264,7 +1329,7 @@ function peticionGuardas(maquina, montar) {
     .filter((g) => g.paginas.length);
   return {
     formato: formatoTripa(t), guardas, rebase: o.rebase, marcas: true, maquina, montar,
-    titulo: `${base(t.archivo?.nombre)} guardas`, fecha: ahora(), correcciones: correcciones(),
+    titulo: `${base(t.archivo?.nombre)} guardas`, fecha: ahora(), correcciones: { ...correcciones(), rebase_fondo: false },
   };
 }
 
@@ -1631,7 +1696,7 @@ function calcularLibro() {
     await respirar();
     try {
       const icc = (await iccDB.leer(maquina.id)) || new Uint8Array();
-      const r = motor.generar_libro(t.archivo.bytes, JSON.stringify(peticionLibro(maquina, t.info)), icc);
+      const r = motor.generar_libro(t.archivo.bytes, JSON.stringify({ ...peticionLibro(maquina, t.info), correcciones: await correccionesParaGenerar(t, tripaDe(t)) }), icc);
       descargar(r.pdf, `${base(t.archivo.nombre)}-pliegos.pdf`);
       const corregidos = JSON.parse(r.informe).avisos.filter((a) => a.startsWith("corregido")).length;
       avisar(`Pliegos listos${corregidos ? ` · ${corregidos} correcciones aplicadas` : ""}`);

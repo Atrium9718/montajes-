@@ -32,6 +32,15 @@ pub struct Correcciones {
     /// sigue y los elementos no se repiten). Si está activo, gana al espejo.
     #[serde(default)]
     pub rebase_estirado: bool,
+    /// Rebase solo con el color del fondo: se ignora lo que el PDF trae
+    /// fuera del corte y cada franja de rebase se rellena con el color que
+    /// tiene la página junto a ese borde (ver `fondos`).
+    #[serde(default)]
+    pub rebase_fondo: bool,
+    /// Color del fondo junto a cada borde de cada página del PDF (RGB 0–1),
+    /// en orden izquierda, abajo, derecha, arriba. Lo mide la app.
+    #[serde(default)]
+    pub fondos: Vec<Option<[[f32; 3]; 4]>>,
 }
 
 impl Correcciones {
@@ -42,6 +51,8 @@ impl Correcciones {
             linea_minima: None,
             rebase_espejo: false,
             rebase_estirado: false,
+            rebase_fondo: false,
+            fondos: Vec::new(),
         }
     }
 
@@ -53,6 +64,8 @@ impl Correcciones {
             linea_minima: Some(0.25),
             rebase_espejo: false,
             rebase_estirado: true,
+            rebase_fondo: false,
+            fondos: Vec::new(),
         }
     }
 

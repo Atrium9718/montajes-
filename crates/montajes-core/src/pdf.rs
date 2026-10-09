@@ -21,6 +21,16 @@ use crate::portada::{Portada, TipoPanel};
 use crate::unidades::{mm_a_pt, pt_a_mm};
 use crate::{Error, Resultado};
 
+/// Conversión simple RGB → CMYK (con generación de negro) para el color del
+/// rebase de fondo.
+fn rgb_a_cmyk(r: f64, g: f64, b: f64) -> (f64, f64, f64, f64) {
+    let k = 1.0 - r.max(g).max(b);
+    if k >= 0.999 {
+        return (0.0, 0.0, 0.0, 1.0);
+    }
+    ((1.0 - r - k) / (1.0 - k), (1.0 - g - k) / (1.0 - k), (1.0 - b - k) / (1.0 - k), k)
+}
+
 /// Solape (mm) de las franjas de rebase generado bajo la página.
 const SOLAPE: f64 = 0.2;
 /// Orilla de la página (mm) que se estira para generar el rebase.
@@ -501,7 +511,48 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
             let tiene = p.rebase_disponible() * s;
             let falta = pide.map(|v| v > tiene + 0.05);
             let corr = &opciones.correcciones;
-            if (corr.rebase_espejo || corr.rebase_estirado) && falta.iter().any(|f| *f) {
+            let fondo = if corr.rebase_fondo { corr.fondos.get(u.pagina).copied().flatten() } else { None };
+            if let Some(colores) = fondo {
+                // Rebase solo con el fondo: franjas del color medido junto a cada
+                // borde (girado como la página) y la página recortada al corte.
+                espejos += 1;
+                let color_lado = |lado_pliego: usize| {
+                    // Lados en sentido horario: izquierda, arriba, derecha, abajo.
+                    let ciclo = [0usize, 3, 2, 1];
+                    let pos = ciclo.iter().position(|l| *l == lado_pliego).unwrap_or(0);
+                    let pasos = (giro / 90) as usize % 4;
+                    colores[ciclo[(pos + 4 - pasos) % 4]]
+                };
+                let [pi, pb, pd, pa] = pide;
+                let bandas = [
+                    (0, Rect::new(r.x, r.y, pi + SOLAPE, r.alto)),
+                    (2, Rect::new(c.derecha() - SOLAPE, r.y, pd + SOLAPE, r.alto)),
+                    (1, Rect::new(c.x, r.y, c.ancho, pb + SOLAPE)),
+                    (3, Rect::new(c.x, c.arriba() - SOLAPE, c.ancho, pa + SOLAPE)),
+                ];
+                for (lado, zona) in bandas {
+                    if zona.ancho > SOLAPE + 1e-6 && zona.alto > SOLAPE + 1e-6 && pide[lado] > 0.01 {
+                        let [rr, gg, bb] = color_lado(lado);
+                        let (rr, gg, bb) = (f64::from(rr), f64::from(gg), f64::from(bb));
+                        // Con perfil de salida (PDF/X) el color va en CMYK; si no, en RGB,
+                        // tal como se midió, para que coincida con el fondo.
+                        let color = if opciones.icc.is_some() {
+                            let (cc, mm_, yy, kk) = rgb_a_cmyk(rr, gg, bb);
+                            format!("{} {} {} {} k", n(cc), n(mm_), n(yy), n(kk))
+                        } else {
+                            format!("{} {} {} rg", n(rr), n(gg), n(bb))
+                        };
+                        contenido += &format!(
+                            "q {color} {} {} {} {} re f Q\n",
+                            n(mm_a_pt(zona.x)),
+                            n(mm_a_pt(zona.y)),
+                            n(mm_a_pt(zona.ancho)),
+                            n(mm_a_pt(zona.alto))
+                        );
+                    }
+                }
+                colocar(&mut contenido, c, &m, &nombre);
+            } else if (corr.rebase_espejo || corr.rebase_estirado) && falta.iter().any(|f| *f) {
                 // Rebase generado sobre cada borde de corte que no tiene rebase
                 // suficiente (y sobre las esquinas): estirando la orilla de la
                 // página (solo sigue el fondo) o reflejándola en espejo.
