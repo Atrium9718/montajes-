@@ -864,14 +864,17 @@ function svgCara(cara, maquina, opciones = {}) {
       const pl = opciones.plegable;
       if (guias && pl?.pliegues?.length) {
         const c = u.corte;
-        for (const p0 of pl.pliegues) {
-          const p = pl.dorso && u.pagina % 2 === 1 ? pl.ancho - p0 : p0;
+        for (const [i, p0] of pl.pliegues.entries()) {
+          const espejo = pl.dorso && u.pagina % 2 === 1;
+          const p = espejo ? pl.ancho - p0 : p0;
           const g = u.giro % 360;
           const [x1, y1, x2, y2] = g === 0 ? [c.x + p * c.ancho / pl.ancho, c.y, c.x + p * c.ancho / pl.ancho, c.y + c.alto]
             : g === 180 ? [c.x + c.ancho - p * c.ancho / pl.ancho, c.y, c.x + c.ancho - p * c.ancho / pl.ancho, c.y + c.alto]
             : g === 90 ? [c.x, c.y + c.alto - p * c.alto / pl.ancho, c.x + c.ancho, c.y + c.alto - p * c.alto / pl.ancho]
             : [c.x, c.y + p * c.alto / pl.ancho, c.x + c.ancho, c.y + p * c.alto / pl.ancho];
-          partes.push(`<line x1="${x1}" y1="${y(y1)}" x2="${x2}" y2="${y(y2)}" stroke="#c03ac0" stroke-width="${W / 700}" stroke-dasharray="${W / 200} ${W / 300}"/>`);
+          // Se puede arrastrar (ver conectarPaginador): la línea ancha invisible es la que se toma.
+          const datos = `data-pliegue="${i}" data-giro="${g}" data-c="${c.x},${c.y},${c.ancho},${c.alto}" data-espejo="${espejo ? 1 : 0}" data-ancho="${pl.ancho}" data-h="${H}"`;
+          partes.push(`<g class="pliegue" ${datos} style="cursor:${g % 180 === 0 ? "ew-resize" : "ns-resize"};touch-action:none"><line x1="${x1}" y1="${y(y1)}" x2="${x2}" y2="${y(y2)}" stroke="#c03ac0" stroke-width="${W / 700}" stroke-dasharray="${W / 200} ${W / 300}"/><line x1="${x1}" y1="${y(y1)}" x2="${x2}" y2="${y(y2)}" stroke="transparent" stroke-width="${W / 60}" pointer-events="stroke"/></g>`);
         }
       }
       if (opciones.numeros !== false && opciones.insignias) {
@@ -948,6 +951,51 @@ function tarjetaVistaPrevia(trabajo, maquina, titulo, insignias = false) {
 
 function conectarPaginador(raiz, trabajo, redibujar) {
   $$("[data-cara]", raiz).forEach((b) => b.addEventListener("click", () => { trabajo.cara = Number(b.dataset.cara); redibujar(); }));
+  // Pliegues del plegable: se arrastran sobre la vista previa y quedan como anchos propios.
+  $$("[data-pliegue]", raiz).forEach((grupo) => grupo.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    const pl = plegableDe(trabajo.op, trabajo.info?.formato);
+    if (!pl) return;
+    const i = Number(grupo.dataset.pliegue);
+    const giro = Number(grupo.dataset.giro);
+    const [cx, cy, cw, ch] = grupo.dataset.c.split(",").map(Number);
+    const ancho = Number(grupo.dataset.ancho), H = Number(grupo.dataset.h);
+    const espejo = grupo.dataset.espejo === "1";
+    const padre = grupo.parentNode;
+    const inicio = new DOMPoint(e.clientX, e.clientY).matrixTransform(padre.getScreenCTM().inverse());
+    // Distancia del pliegue al borde izquierdo del exterior (mm) para un punto del pliego.
+    const distancia = (pt) => {
+      const yPdf = H - pt.y;
+      let p = giro === 0 ? (pt.x - cx) * ancho / cw : giro === 180 ? (cx + cw - pt.x) * ancho / cw
+        : giro === 90 ? (cy + ch - yPdf) * ancho / ch : (yPdf - cy) * ancho / ch;
+      if (espejo) p = ancho - p;
+      const antes = i > 0 ? pl.pliegues[i - 1] : 0, despues = i < pl.pliegues.length - 1 ? pl.pliegues[i + 1] : ancho;
+      return Math.round(Math.min(despues - 5, Math.max(antes + 5, p)) * 10) / 10;
+    };
+    let ultimo = pl.pliegues[i];
+    grupo.setPointerCapture(e.pointerId);
+    const mover = (ev) => {
+      const pt = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(padre.getScreenCTM().inverse());
+      ultimo = distancia(pt);
+      const dx = pt.x - inicio.x, dy = pt.y - inicio.y;
+      grupo.setAttribute("transform", giro % 180 === 0 ? `translate(${dx} 0)` : `translate(0 ${dy})`);
+      grupo.querySelector("line").setAttribute("stroke", "#e0218a");
+    };
+    const soltar = () => {
+      grupo.removeEventListener("pointermove", mover);
+      grupo.removeEventListener("pointerup", soltar);
+      grupo.removeEventListener("pointercancel", soltar);
+      const nuevos = pl.pliegues.map((v, k) => (k === i ? ultimo : v));
+      const bordes = [0, ...nuevos, ancho];
+      trabajo.op.anchos = bordes.slice(1).map((v, k) => (v - bordes[k]).toFixed(1)).join(" ");
+      avisar(`Pliegue ${i + 1} a ${mm(ultimo, 1)} mm del borde izquierdo del exterior`);
+      const vista = $("#vista");
+      if (trabajo === estado.piezas && vista) vistaPiezas(vista); else redibujar();
+    };
+    grupo.addEventListener("pointermove", mover);
+    grupo.addEventListener("pointerup", soltar);
+    grupo.addEventListener("pointercancel", soltar);
+  }));
   $$('[data-chips="vista-guias"]', raiz).forEach((g) => g.addEventListener("click", (e) => {
     const b = e.target.closest(".chip");
     if (!b) return;
@@ -1449,7 +1497,7 @@ function bloquePlegable(t) {
       <small>${(o.archivoPlegable || "abierto") === "cuerpos" ? `Páginas en orden físico: los ${n} cuerpos del exterior de izquierda a derecha y luego los ${n} del interior de izquierda a derecha. Se unen en una pieza abierta.` : "Página 1 el exterior abierto y página 2 el interior (frente y dorso)."}</small></div>
     <div class="fila">
       ${pl && pl.tipo !== "acordeon" && pl.tipo !== "diptico" ? `<label class="campo"><span>Compensación (mm)</span><input type="number" step="0.5" min="0" max="6" id="pz-compensacion" value="${num(o.compensacion, 2)}"><small>Lo que es más angosto el cuerpo que se mete adentro.</small></label>` : ""}
-      <label class="campo"><span>Cuerpos del exterior (mm)</span><input type="text" id="pz-anchos" placeholder="Automático" value="${esc(o.anchos || "")}"><small>De izquierda a derecha, separados por espacios; vacío = automático.</small></label>
+      <label class="campo"><span>Cuerpos del exterior (mm)</span><input type="text" id="pz-anchos" placeholder="Automático" value="${esc(o.anchos || "")}"><small>De izquierda a derecha, separados por espacios; vacío = automático. También puedes arrastrar los pliegues en la vista previa (Con guías).</small></label>
     </div>
     ${pl ? `<p class="nota">${pl.escritosMal ? `<b>Los anchos escritos no suman ${r(t.info.formato.ancho)} mm:</b> se usan los automáticos. ` : ""}Exterior: ${pl.anchos.map(r).join(" | ")} mm (el interior va al revés). Abierto ${r(t.info.formato.ancho)} × ${r(t.info.formato.alto)} mm · cerrado ${r(pl.cerrado.ancho)} × ${r(pl.cerrado.alto)} mm. Los pliegues se marcan punteados fuera del bloque.</p>` : t.info ? "" : `<p class="nota">Sube el PDF para ver los cuerpos.</p>`}` : ""}`;
 }
