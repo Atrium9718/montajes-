@@ -348,10 +348,12 @@ function selectorMaquina(id) {
   return `<label class="campo"><span>Máquina</span>
     <select id="${id}">${estado.maquinas.map((m) => `<option value="${esc(m.id)}" ${m.id === elegida ? "selected" : ""}>${esc(m.nombre)} · ${mm(m.pliego_max.ancho, 0)}×${mm(m.pliego_max.alto, 0)}</option>`).join("")}</select></label>`;
 }
-const margenDe = (o) => (o?.margen === "maquina" ? "maquina" : "1cm");
+/** Margen libre del pliego en mm (10 = 1 cm) o «maquina» (los márgenes de la máquina). */
+const margenDe = (o) => (o?.margen === "maquina" ? "maquina" : ({ 5: 5, 3: 3 })[o?.margen] ?? 10);
 function campoMargen(o) {
-  return `<div class="campo"><span>Margen del pliego</span>${chips("margen", [["1cm", "1 cm por lado"], ["maquina", "Según la máquina"]], margenDe(o))}
-    <small>${margenDe(o) === "1cm" ? "Solo 1 cm libre en cada borde: ahí van las marcas de corte y registro, la tira de control y el rótulo; las piezas llegan con su rebase hasta ese centímetro." : "Los márgenes de la máquina (pinza, cola y laterales) y las marcas por dentro de ellos."}</small></div>`;
+  const m = margenDe(o);
+  return `<div class="campo"><span>Margen del pliego</span>${chips("margen", [["10", "1 cm"], ["5", "5 mm"], ["3", "3 mm"], ["maquina", "Según la máquina"]], String(m))}
+    <small>${m === "maquina" ? "Los márgenes de la máquina (pinza, cola y laterales) y las marcas por dentro de ellos." : `Solo ${m === 10 ? "1 cm" : `${m} mm`} libre en cada borde: ahí van las marcas de corte y registro, la tira de control y el rótulo (lo que no quepa se omite y se avisa); las piezas llegan con su rebase hasta ese margen.`}</small></div>`;
 }
 /** Máquina elegida, con la pinza que se haya puesto para este trabajo (vale solo para esa máquina). */
 function maquinaElegida(id) {
@@ -361,7 +363,8 @@ function maquinaElegida(id) {
   const pinza = o.pinza != null && o.pinzaDe === m.id ? o.pinza : null;
   // «1 cm por lado»: el margen del pliego es 1 cm en los cuatro lados (la
   // pinza, si se cambió para el trabajo, manda) y las marcas van en él.
-  if (margenDe(o) === "1cm") return { ...m, pinza: pinza ?? 10, cola: 10, lateral: 10 };
+  const margen = margenDe(o);
+  if (margen !== "maquina") return { ...m, pinza: pinza ?? margen, cola: margen, lateral: margen };
   return pinza != null ? { ...m, pinza } : m;
 }
 
@@ -1453,7 +1456,7 @@ function peticionPiezas(maquina, info, orientacion) {
     dorso: o.dorso, volteo: o.volteo, marcas: o.marcas, tira_color: o.tira,
     titulo: base(estado.piezas.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
     pliegues: o.modo === "repetir" ? plegableDe(o, info.formato)?.pliegues || [] : [],
-    marcas_en_margen: margenDe(o) === "1cm",
+    marcas_en_margen: margenDe(o) !== "maquina",
   };
 }
 
@@ -1534,6 +1537,33 @@ function peticionCombinado(maquina, info) {
   return { ...peticionPiezas(maquina, info), disenos: disenosCombinado(estado.piezas).map(({ frente, dorso, cantidad }) => ({ frente, dorso, cantidad })) };
 }
 
+/**
+ * ¿Entrarían más piezas cambiando el margen o el corte? Prueba los cambios
+ * menos invasivos y devuelve el que más piezas da (o null).
+ */
+function sugerenciaPiezas(t, actuales) {
+  if (t.op.modo !== "repetir" || !t.info?.formato) return null;
+  const pruebas = [
+    { cambio: { margen: "5" }, texto: "con margen de 5 mm" },
+    { cambio: { calle: 0 }, texto: "con corte sencillo (sin calle entre piezas)" },
+    { cambio: { margen: "5", calle: 0 }, texto: "con margen de 5 mm y corte sencillo" },
+    { cambio: { margen: "3", calle: 0 }, texto: "con margen de 3 mm y corte sencillo" },
+    { cambio: { margen: "maquina" }, texto: "con los márgenes de la máquina" },
+  ].filter((p) => Object.entries(p.cambio).some(([k, v]) => String(t.op[k] ?? "") !== String(v)));
+  const original = t.op;
+  let mejor = null;
+  for (const p of pruebas) {
+    t.op = { ...original, ...p.cambio };
+    try {
+      const plan = JSON.parse(motor.planear_nup(JSON.stringify(peticionPiezas(maquinaElegida("pz-maquina"), t.info))));
+      const n = plan.distribucion.columnas * plan.distribucion.filas;
+      if (n > actuales && (!mejor || n > mejor.n)) mejor = { ...p, n };
+    } catch { /* tampoco cabe */ }
+  }
+  t.op = original;
+  return mejor;
+}
+
 function calcularPiezas() {
   const t = estado.piezas;
   const caja = $("#pz-resultado");
@@ -1573,8 +1603,12 @@ function calcularPiezas() {
     : d ? `<div class="metrica"><b>${d.columnas * d.filas}</b><span>piezas por pliego</span></div>
         <div class="metrica"><b>${mm(d.aprovechamiento, 0)}%</b><span>aprovechamiento</span></div>
         <div class="metrica"><b>${t.plan.caras.length}</b><span>${t.plan.caras.length === 1 ? "pliego" : "pliegos"} en el PDF</span></div>` : "";
+  const actuales = d ? d.columnas * d.filas : 0;
+  const sug = !t.error && maquina ? sugerenciaPiezas(t, actuales) : null;
   const html = `
     ${t.error || errorPlan ? `<div class="error-caja">${esc(t.error || errorPlan)}</div>` : ""}
+    ${sug ? `<div class="aviso-dobles"><b>Entran ${sug.n} por pliego en vez de ${actuales}</b> ${sug.texto}. Lo que hoy no deja es ${sug.cambio.margen && sug.cambio.margen !== "maquina" ? `el margen de ${margenDe(t.op) === "maquina" ? "la máquina" : `${margenDe(t.op)} mm`}` : sug.cambio.margen === "maquina" ? "el margen elegido" : ""}${sug.cambio.margen && "calle" in sug.cambio ? " y " : ""}${"calle" in sug.cambio ? `la calle de ${mm(t.op.calle)} mm del doble corte` : ""}.
+      <button class="boton boton-naranja boton-chico" type="button" id="pz-aplicar-sugerencia">Aplicar</button></div>` : ""}
     ${d ? `<section class="tarjeta-oscura">
       <div class="metricas">
         ${metricas}
@@ -1596,6 +1630,11 @@ function calcularPiezas() {
   if (carasPz?.length) pedirMiniaturas(t, carasPz[Math.min(t.cara, carasPz.length - 1)].ubicaciones.map((u) => u.pagina), calcularPiezas);
   if (!pintar(caja, html)) return;
   conectarPaginador(caja, t, calcularPiezas);
+  $("#pz-aplicar-sugerencia")?.addEventListener("click", () => {
+    Object.assign(t.op, sug.cambio);
+    avisar(`Listo: ${sug.n} piezas por pliego ${sug.texto}`);
+    vistaPiezas($("#vista"));
+  });
   $("#pz-generar")?.addEventListener("click", async (e) => {
     const b = e.currentTarget;
     b.disabled = true; b.textContent = "Generando…";
@@ -2145,7 +2184,7 @@ function peticionLibro(maquina, info) {
   const tripa = tripaDe(estado.libro);
   const enOrden = tripa.length === info.paginas.length;
   return {
-    maquina, formato: formatoTripa(estado.libro), paginas: tripa.length, encuadernacion: o.encuadernacion, marcas_en_margen: margenDe(o) === "1cm",
+    maquina, formato: formatoTripa(estado.libro), paginas: tripa.length, encuadernacion: o.encuadernacion, marcas_en_margen: margenDe(o) !== "maquina",
     mapa: enOrden ? [] : tripa, cuadernillos: armadoDe(o, maquina) === "sueltas" ? [] : cuadernillosDe(o, tripa.length),
     firma: armadoDe(o, maquina) === "sueltas" ? 4 : o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,

@@ -235,6 +235,10 @@ pub fn generar(cortes: &[Rect], pliego: Tamano, area: &Rect, rebase: f64, op: &O
             Some(Rotulo { x: 1.0 + h, y: b.y, alto: h, largo: b.alto, vertical: true })
         } else if libre_der >= h + 1.5 {
             Some(Rotulo { x: pliego.ancho - 1.0, y: b.y, alto: h, largo: b.alto, vertical: true })
+        } else if b.y - d >= h + 1.5 && xs.len() >= 2 {
+            // Abajo, entre las dos primeras marcas de corte (sin cruzarlas).
+            let x = xs[0] + 2.0;
+            Some(Rotulo { x, y: 1.0, alto: h, largo: xs[1] - x - 2.0, vertical: false })
         } else {
             None
         };
