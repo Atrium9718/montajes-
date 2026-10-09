@@ -497,7 +497,7 @@ async function medirFondos(trabajo, indices) {
     const lib = await cargarPdfjs();
     trabajo.pdfjs ??= lib.getDocument({ data: trabajo.archivo.bytes.slice() }).promise;
     const doc = await trabajo.pdfjs;
-    for (const i of faltan) {
+    for (const i of faltan) try {
       const info = trabajo.info.paginas[i];
       const pagina = await doc.getPage(i + 1);
       const base = pagina.getViewport({ scale: 1, rotation: 0 });
@@ -532,6 +532,10 @@ async function medirFondos(trabajo, indices) {
         const [r, g, bb, n] = [...cubetas.values()].sort((p, q) => q[3] - p[3])[0] || [255, 255, 255, 1];
         return [r / n / 255, g / n / 255, bb / n / 255];
       });
+    } catch (e) {
+      // Sin color medido el motor estira la orilla: tampoco usa lo de fuera del corte.
+      console.warn(`No se pudo medir el fondo de la página ${i + 1}:`, e);
+      trabajo.fondos[i] = null;
     }
   }
   const lista = [];
@@ -543,7 +547,7 @@ async function medirFondos(trabajo, indices) {
 async function correccionesParaGenerar(trabajo, indices) {
   const c = correcciones();
   if (c.rebase_fondo && trabajo.archivo && trabajo.info) {
-    try { c.fondos = await medirFondos(trabajo, indices); } catch (e) { console.warn("No se pudo medir el fondo:", e); c.rebase_fondo = false; }
+    try { c.fondos = await medirFondos(trabajo, indices); } catch (e) { console.warn("No se pudo medir el fondo:", e); c.fondos = []; }
   }
   return c;
 }

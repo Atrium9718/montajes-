@@ -508,9 +508,12 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
             let (c, r) = (u.corte, u.recorte);
             // Cuánto rebase pide cada lado: izquierda, abajo, derecha, arriba.
             let pide = [c.x - r.x, c.y - r.y, r.derecha() - c.derecha(), r.arriba() - c.arriba()];
-            let tiene = p.rebase_disponible() * s;
-            let falta = pide.map(|v| v > tiene + 0.05);
             let corr = &opciones.correcciones;
+            // «Solo fondo» nunca usa lo que el PDF trae fuera del corte: si no hay
+            // color medido para la página, se estira la orilla en todos los lados.
+            let tiene = if corr.rebase_fondo { 0.0 } else { p.rebase_disponible() * s };
+            let falta = pide.map(|v| v > tiene + 0.01);
+            let estirado = corr.rebase_estirado || corr.rebase_fondo;
             let fondo = if corr.rebase_fondo { corr.fondos.get(u.pagina).copied().flatten() } else { None };
             if let Some(colores) = fondo {
                 // Rebase solo con el fondo: franjas del color medido junto a cada
@@ -552,7 +555,7 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                     }
                 }
                 colocar(&mut contenido, c, &m, &nombre);
-            } else if (corr.rebase_espejo || corr.rebase_estirado) && falta.iter().any(|f| *f) {
+            } else if (corr.rebase_espejo || estirado) && falta.iter().any(|f| *f) {
                 // Rebase generado sobre cada borde de corte que no tiene rebase
                 // suficiente (y sobre las esquinas): estirando la orilla de la
                 // página (solo sigue el fondo) o reflejándola en espejo.
@@ -568,7 +571,7 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                     (k, fijo * (1.0 - k))
                 };
                 let tx = |a: f64, b: f64, signo: f64| {
-                    if corr.rebase_estirado {
+                    if estirado {
                         let (k, t) = estirar(a, b, signo);
                         [k, 0.0, 0.0, 1.0, t, 0.0]
                     } else {
@@ -576,7 +579,7 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                     }
                 };
                 let ty = |a: f64, b: f64, signo: f64| {
-                    if corr.rebase_estirado {
+                    if estirado {
                         let (k, t) = estirar(a, b, signo);
                         [1.0, 0.0, 0.0, k, 0.0, t]
                     } else {
@@ -639,7 +642,13 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
     if espejos > 0 {
         informe.avisos.push(format!(
             "corregido: rebase generado {} en {espejos} ubicaciones sin rebase suficiente",
-            if opciones.correcciones.rebase_estirado { "estirando el fondo de la orilla" } else { "en espejo" }
+            if opciones.correcciones.rebase_fondo {
+                "solo con el fondo"
+            } else if opciones.correcciones.rebase_estirado {
+                "estirando el fondo de la orilla"
+            } else {
+                "en espejo"
+            }
         ));
     }
     let cantidad = hijos.len() as i64;
