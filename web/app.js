@@ -1638,18 +1638,36 @@ function formatoTripa(t) {
   const p = t.info?.paginas[i ?? 0];
   return p ? { ancho: p.ancho, alto: p.alto } : t.info?.formato;
 }
-function cuadernillosDe(o) {
+const FIRMAS_VALIDAS = [4, 8, 16, 32, 64];
+/** Cuadernillos escritos tal cual. */
+function cuadernillosEscritos(o) {
   return String(o.cuadernillos || "").split(/[^0-9]+/).map(Number).filter((n) => n > 0);
 }
+/**
+ * Cuadernillos para el libro: los escritos y, si no alcanzan para la tripa,
+ * se completa repitiendo el último (p. ej. «16» = todo en cuadernillos de 16)
+ * y cerrando con el más chico que alcance, para dejar pocas páginas en blanco.
+ */
+function cuadernillosDe(o, tripa = 0) {
+  const lista = cuadernillosEscritos(o);
+  if (!lista.length || lista.some((n) => !FIRMAS_VALIDAS.includes(n))) return lista;
+  const ultimo = lista[lista.length - 1];
+  let falta = tripa - lista.reduce((a, b) => a + b, 0);
+  while (falta > ultimo) { lista.push(ultimo); falta -= ultimo; }
+  if (falta > 0) lista.push(FIRMAS_VALIDAS.find((n) => n >= falta && n <= ultimo) ?? ultimo);
+  return lista;
+}
 function textoCuadernillos(t) {
-  const lista = cuadernillosDe(t.op);
+  const escritos = cuadernillosEscritos(t.op);
   const tripa = tripaDe(t).length;
-  if (!lista.length) return "Vacío: la app elige la firma más grande que quepa.";
-  const suma = lista.reduce((a, b) => a + b, 0);
-  const malos = lista.filter((n) => ![4, 8, 16, 32, 64].includes(n));
+  if (!escritos.length) return "Vacío: la app elige la firma más grande que quepa. Escribe un número (p. ej. 16) para hacer todo en cuadernillos de ese tamaño.";
+  const malos = escritos.filter((n) => !FIRMAS_VALIDAS.includes(n));
   if (malos.length) return `Cuadernillos de ${malos.join(", ")} páginas no son válidos: use 4, 8, 16, 32 o 64.`;
-  if (suma < tripa) return `Suman ${suma} páginas y la tripa tiene ${tripa}: faltan ${tripa - suma}.`;
-  return `${lista.length} cuadernillos, ${suma} páginas${suma > tripa ? ` (${suma - tripa} en blanco al final)` : ""}.`;
+  const lista = cuadernillosDe(t.op, tripa);
+  const suma = lista.reduce((a, b) => a + b, 0);
+  const resumen = Object.entries(lista.reduce((m, n) => ({ ...m, [n]: (m[n] || 0) + 1 }), {})).sort((a, b) => b[0] - a[0]).map(([n, k]) => `${k} de ${n}`).join(" + ");
+  const completado = lista.length > escritos.length ? "Completado: " : "";
+  return `${completado}${resumen} = ${suma} páginas${suma > tripa ? ` (${suma - tripa} en blanco al final)` : ""}.`;
 }
 
 /** Páginas dobles: miden el doble de ancho que las sencillas (pliegos de lectura). */
@@ -2052,7 +2070,8 @@ function vistaLibro(main) {
       </div>
       <div class="columna-resultado"><div class="resultado" id="lb-resultado"></div><div id="lb-comparar"></div><div id="lb-caratula"></div><div id="lb-guardas"></div><div id="lb-cotizacion"></div></div>
     </div>`;
-  conectarArchivo("lb-archivo", (a) => { analizarArchivo(t, a, true); t.roles = t.info ? rolesIniciales(t.info) : []; vistaLibro(main); });
+  // Libro nuevo: los cuadernillos a mano eran del anterior.
+  conectarArchivo("lb-archivo", (a) => { analizarArchivo(t, a, true); t.roles = t.info ? rolesIniciales(t.info) : []; o.cuadernillos = ""; vistaLibro(main); });
   conectarPaginasLibro(main, t);
   $("#lb-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaLibro(main); });
   conectarCorrecciones(main, () => vistaLibro(main));
@@ -2093,7 +2112,7 @@ function peticionLibro(maquina, info) {
   const enOrden = tripa.length === info.paginas.length;
   return {
     maquina, formato: formatoTripa(estado.libro), paginas: tripa.length, encuadernacion: o.encuadernacion,
-    mapa: enOrden ? [] : tripa, cuadernillos: armadoDe(o, maquina) === "sueltas" ? [] : cuadernillosDe(o),
+    mapa: enOrden ? [] : tripa, cuadernillos: armadoDe(o, maquina) === "sueltas" ? [] : cuadernillosDe(o, tripa.length),
     firma: armadoDe(o, maquina) === "sueltas" ? 4 : o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
     derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: armadoDe(o, maquina) === "sueltas" ? "combinar" : o.aprovechamiento || "auto",
