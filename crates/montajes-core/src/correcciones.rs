@@ -28,6 +28,10 @@ pub struct Correcciones {
     /// Generar el rebase reflejando la página cuando el PDF no lo trae.
     #[serde(default)]
     pub rebase_espejo: bool,
+    /// Generar el rebase estirando solo la orilla de la página (el fondo
+    /// sigue y los elementos no se repiten). Si está activo, gana al espejo.
+    #[serde(default)]
+    pub rebase_estirado: bool,
 }
 
 impl Correcciones {
@@ -37,6 +41,7 @@ impl Correcciones {
             quitar_sobreimpresion_blanco: false,
             linea_minima: None,
             rebase_espejo: false,
+            rebase_estirado: false,
         }
     }
 
@@ -46,7 +51,8 @@ impl Correcciones {
             sobreimprimir_negro: true,
             quitar_sobreimpresion_blanco: true,
             linea_minima: Some(0.25),
-            rebase_espejo: true,
+            rebase_espejo: false,
+            rebase_estirado: true,
         }
     }
 

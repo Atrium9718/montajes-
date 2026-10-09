@@ -628,7 +628,7 @@ pub fn revisar(fuente: &Fuente, op: &OpcionesPreflight) -> InformePreflight {
             paginas.sort_unstable();
             let corregible = match codigo.as_str() {
                 "linea_fina" => Some("linea_minima"),
-                "rebase" => Some("rebase_espejo"),
+                "rebase" => Some("rebase_estirado"),
                 "sobreimpresion_blanco" => Some("quitar_sobreimpresion_blanco"),
                 "negro_sin_sobreimpresion" => Some("sobreimprimir_negro"),
                 _ => None,

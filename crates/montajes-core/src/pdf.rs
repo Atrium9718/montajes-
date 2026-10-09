@@ -21,8 +21,10 @@ use crate::portada::{Portada, TipoPanel};
 use crate::unidades::{mm_a_pt, pt_a_mm};
 use crate::{Error, Resultado};
 
-/// Solape (mm) de las franjas de rebase en espejo bajo la página.
+/// Solape (mm) de las franjas de rebase generado bajo la página.
 const SOLAPE: f64 = 0.2;
+/// Orilla de la página (mm) que se estira para generar el rebase.
+const ORILLA: f64 = 0.3;
 
 /// Límite de descompresión por página (protege de PDFs maliciosos).
 const LIMITE_CONTENIDO: usize = 512 * 1024 * 1024;
@@ -498,26 +500,52 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
             let pide = [c.x - r.x, c.y - r.y, r.derecha() - c.derecha(), r.arriba() - c.arriba()];
             let tiene = p.rebase_disponible() * s;
             let falta = pide.map(|v| v > tiene + 0.05);
-            if opciones.correcciones.rebase_espejo && falta.iter().any(|f| *f) {
-                // Rebase en espejo: se refleja la página sobre cada borde de corte
-                // que no tiene rebase suficiente (y sobre las esquinas).
+            let corr = &opciones.correcciones;
+            if (corr.rebase_espejo || corr.rebase_estirado) && falta.iter().any(|f| *f) {
+                // Rebase generado sobre cada borde de corte que no tiene rebase
+                // suficiente (y sobre las esquinas): estirando la orilla de la
+                // página (solo sigue el fondo) o reflejándola en espejo.
                 espejos += 1;
                 let (x0, y0, x1, y1) = (mm_a_pt(c.x), mm_a_pt(c.y), mm_a_pt(c.derecha()), mm_a_pt(c.arriba()));
-                let refl_x = |a: f64| [-1.0, 0.0, 0.0, 1.0, 2.0 * a, 0.0];
-                let refl_y = |b: f64| [1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * b];
-                let [fi, fb, fd, fa] = falta;
                 let [pi, pb, pd, pa] = pide;
+                // Orilla que se estira: 0,3 mm de la página hacia adentro del corte.
+                let e = mm_a_pt(ORILLA);
+                let estirar = |desde: f64, hacia_afuera: f64, signo: f64| {
+                    // Lleva la franja [desde, desde + signo·e] a [desde − signo·b, desde + signo·e].
+                    let fijo = desde + signo * e;
+                    let k = (e + mm_a_pt(hacia_afuera)) / e;
+                    (k, fijo * (1.0 - k))
+                };
+                let tx = |a: f64, b: f64, signo: f64| {
+                    if corr.rebase_estirado {
+                        let (k, t) = estirar(a, b, signo);
+                        [k, 0.0, 0.0, 1.0, t, 0.0]
+                    } else {
+                        [-1.0, 0.0, 0.0, 1.0, 2.0 * a, 0.0]
+                    }
+                };
+                let ty = |a: f64, b: f64, signo: f64| {
+                    if corr.rebase_estirado {
+                        let (k, t) = estirar(a, b, signo);
+                        [1.0, 0.0, 0.0, k, 0.0, t]
+                    } else {
+                        [1.0, 0.0, 0.0, -1.0, 0.0, 2.0 * a]
+                    }
+                };
+                let [fi, fb, fd, fa] = falta;
+                let (izq, der) = (tx(x0, pi, 1.0), tx(x1, pd, -1.0));
+                let (abajo, arriba) = (ty(y0, pb, 1.0), ty(y1, pa, -1.0));
                 let franjas: [(bool, Rect, Vec<[f64; 6]>); 8] = [
                     // Cada franja se mete 0,2 mm bajo la página (que va encima) para
                     // que no quede un filo blanco por el antialias del visor o del RIP.
-                    (fi, Rect::new(r.x, c.y, pi + SOLAPE, c.alto), vec![refl_x(x0)]),
-                    (fd, Rect::new(c.derecha() - SOLAPE, c.y, pd + SOLAPE, c.alto), vec![refl_x(x1)]),
-                    (fb, Rect::new(c.x, r.y, c.ancho, pb + SOLAPE), vec![refl_y(y0)]),
-                    (fa, Rect::new(c.x, c.arriba() - SOLAPE, c.ancho, pa + SOLAPE), vec![refl_y(y1)]),
-                    (fi && fb, Rect::new(r.x, r.y, pi, pb), vec![refl_x(x0), refl_y(y0)]),
-                    (fd && fb, Rect::new(c.derecha(), r.y, pd, pb), vec![refl_x(x1), refl_y(y0)]),
-                    (fi && fa, Rect::new(r.x, c.arriba(), pi, pa), vec![refl_x(x0), refl_y(y1)]),
-                    (fd && fa, Rect::new(c.derecha(), c.arriba(), pd, pa), vec![refl_x(x1), refl_y(y1)]),
+                    (fi, Rect::new(r.x, c.y, pi + SOLAPE, c.alto), vec![izq]),
+                    (fd, Rect::new(c.derecha() - SOLAPE, c.y, pd + SOLAPE, c.alto), vec![der]),
+                    (fb, Rect::new(c.x, r.y, c.ancho, pb + SOLAPE), vec![abajo]),
+                    (fa, Rect::new(c.x, c.arriba() - SOLAPE, c.ancho, pa + SOLAPE), vec![arriba]),
+                    (fi && fb, Rect::new(r.x, r.y, pi, pb), vec![izq, abajo]),
+                    (fd && fb, Rect::new(c.derecha(), r.y, pd, pb), vec![der, abajo]),
+                    (fi && fa, Rect::new(r.x, c.arriba(), pi, pa), vec![izq, arriba]),
+                    (fd && fa, Rect::new(c.derecha(), c.arriba(), pd, pa), vec![der, arriba]),
                 ];
                 for (aplica, zona, reflejos) in franjas {
                     if aplica && zona.ancho > 0.0 && zona.alto > 0.0 {
@@ -558,9 +586,10 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
     }
     informe.avisos.extend(conteo.avisos());
     if espejos > 0 {
-        informe
-            .avisos
-            .push(format!("corregido: rebase generado en espejo en {espejos} ubicaciones sin rebase suficiente"));
+        informe.avisos.push(format!(
+            "corregido: rebase generado {} en {espejos} ubicaciones sin rebase suficiente",
+            if opciones.correcciones.rebase_estirado { "estirando el fondo de la orilla" } else { "en espejo" }
+        ));
     }
     let cantidad = hijos.len() as i64;
     doc.objects

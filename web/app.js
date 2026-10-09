@@ -68,7 +68,7 @@ const estado = {
   maquinas: almacen.leer("maquinas", []),
   papeles: almacen.leer("papeles", []),
   preferencias: almacen.leer("preferencias", {}),
-  piezas: { archivo: null, archivos: [], info: null, plan: null, error: null, cara: 0, op: { modo: "repetir", cantidades: [], rebase: 3, calle: 0, orientacion: "auto", dorso: false, volteo: "lateral", marcas: true, tira: true } },
+  piezas: { archivo: null, archivos: [], info: null, plan: null, error: null, cara: 0, op: { modo: "repetir", cantidades: [], rebase: 3, calle: 6, orientacion: "auto", dorso: false, volteo: "lateral", marcas: true, tira: true } },
   libro: { archivo: null, info: null, plan: null, error: null, cara: 0, op: { encuadernacion: "lomo", firma: "auto", aprovechamiento: "auto", rebase: 3, fresado: 3, refile: 3, rtl: false, marcas: true, tira: true, creep: true } },
   portada: { archivo: null, info: null, calculo: null, error: null, op: { ancho: 148, alto: 210, paginas: 240, lomo: "", tipo: "rustica", solapa: 0, carton: 2.5, escuadra: 3, vuelta: 15, bisagra: 8, rebase: 3, rtl: false, orden: ["tapa", "contratapa", "lomo", "solapa_tapa", "solapa_contratapa"] } },
 };
@@ -78,11 +78,12 @@ const CORRECCIONES = [
   ["sobreimprimir_negro", "Sobreimprimir el negro 100 %", "Evita filetes blancos si el registro se mueve."],
   ["quitar_sobreimpresion_blanco", "Quitar sobreimpresión de blancos", "Si no, los objetos blancos desaparecen al imprimir."],
   ["linea_minima", "Engrosar líneas finas a 0,25 pt", "Las más finas pueden no verse."],
-  ["rebase_espejo", "Completar el rebase si falta (mínimo 3 mm)", "Si la página trae menos rebase, refleja su borde para llegar a 3 mm."],
+  ["rebase_estirado", "Completar el rebase si falta, solo con el fondo", "Si la página trae menos de 3 mm, estira la orilla de la página: sigue el fondo sin repetir textos ni logos."],
+  ["rebase_espejo", "Completar el rebase en espejo (en vez de estirar)", "Refleja los 3 mm del borde: puede repetir elementos cercanos al corte."],
 ];
 function correcciones() {
-  const c = { sobreimprimir_negro: true, quitar_sobreimpresion_blanco: true, linea_minima: true, rebase_espejo: true, ...(estado.preferencias.correcciones || {}) };
-  return { ...c, linea_minima: c.linea_minima ? 0.25 : null };
+  const c = { sobreimprimir_negro: true, quitar_sobreimpresion_blanco: true, linea_minima: true, rebase_estirado: true, rebase_espejo: false, ...(estado.preferencias.correcciones || {}) };
+  return { ...c, linea_minima: c.linea_minima ? 0.25 : null, rebase_estirado: c.rebase_estirado && !c.rebase_espejo };
 }
 function bloqueCorrecciones(prefijo) {
   const c = correcciones();
@@ -835,8 +836,10 @@ function vistaPiezas(main) {
           ${selectorMaquina("pz-maquina")}
           <div class="fila">
             <label class="campo"><span>Rebase (mm)</span><input type="number" step="0.5" min="3" id="pz-rebase" value="${o.rebase}"></label>
-            <label class="campo"><span>Calle (mm)</span><input type="number" step="0.5" min="0" id="pz-calle" value="${o.calle}"><small>0 = corte compartido</small></label>
+            <label class="campo"><span>Calle (mm)</span><input type="number" step="0.5" min="0" id="pz-calle" value="${o.calle}"><small>${o.calle >= 2 * o.rebase ? "Doble corte: cada pieza con su rebase" : o.calle > 0 ? "Calle menor que 2 × rebase: el rebase se recorta" : "Corte compartido (sencillo)"}</small></label>
           </div>
+          <div class="campo"><span>Corte entre piezas</span>${chips("corte", [["doble", "Doble corte (calle con rebase)"], ["sencillo", "Corte sencillo (compartido)"]], o.calle > 0 ? "doble" : "sencillo")}
+            <small>Doble corte: entre pieza y pieza queda una calle de ${mm(2 * o.rebase)} mm con el rebase de cada una; si la cuchilla se corre, no se ve la pieza vecina.</small></div>
           <div class="campo"><span>Orientación</span>${chips("orientacion", [["auto", "Automática"], ["normal", "Normal"], ["girada", "Girada 90°"]], o.orientacion)}</div>
           ${campoEscala("pz", o, t.info?.formato)}
           ${selectorPapel("pz", o, maquinaElegida("pz-maquina"), null)}
@@ -885,6 +888,7 @@ function vistaPiezas(main) {
     if (antes.dorso !== o.dorso) vistaPiezas(main); else calcularPiezas();
   }));
   conectarChips(main, (n, v) => {
+    if (n === "corte") { o.calle = v === "doble" ? 2 * o.rebase : 0; vistaPiezas(main); return; }
     o[n] = v;
     if (n === "modo") {
       // Cada modo trabaja con sus propios archivos.

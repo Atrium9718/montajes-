@@ -481,12 +481,21 @@ struct ArgsCorreccion {
     /// Generar el rebase reflejando la página cuando el PDF no lo trae.
     #[arg(long)]
     rebase_espejo: bool,
+    /// Generar el rebase estirando la orilla de la página (solo el fondo).
+    #[arg(long)]
+    rebase_estirado: bool,
 }
 
 impl ArgsCorreccion {
     fn correcciones(&self) -> Correcciones {
         let mut c = if self.corregir { Correcciones::recomendadas() } else { Correcciones::ninguna() };
-        c.rebase_espejo = self.rebase_espejo;
+        if self.rebase_espejo {
+            c.rebase_espejo = true;
+            c.rebase_estirado = false;
+        }
+        if self.rebase_estirado {
+            c.rebase_estirado = true;
+        }
         c
     }
 }
