@@ -1651,10 +1651,13 @@ function cuadernillosEscritos(o) {
 function cuadernillosDe(o, tripa = 0) {
   const lista = cuadernillosEscritos(o);
   if (!lista.length || lista.some((n) => !FIRMAS_VALIDAS.includes(n))) return lista;
+  // Igual que firmas::completar_cuadernillos: el último tamaño mientras quepa y
+  // luego los más chicos que cuadren (las páginas se redondean a múltiplo de 4).
   const ultimo = lista[lista.length - 1];
-  let falta = tripa - lista.reduce((a, b) => a + b, 0);
-  while (falta > ultimo) { lista.push(ultimo); falta -= ultimo; }
-  if (falta > 0) lista.push(FIRMAS_VALIDAS.find((n) => n >= falta && n <= ultimo) ?? ultimo);
+  let falta = Math.ceil(Math.max(0, tripa - lista.reduce((a, b) => a + b, 0)) / 4) * 4;
+  for (const n of [...FIRMAS_VALIDAS].reverse().filter((n) => n <= ultimo)) {
+    while (falta >= n) { lista.push(n); falta -= n; }
+  }
   return lista;
 }
 function textoCuadernillos(t) {

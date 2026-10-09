@@ -315,6 +315,31 @@ fn montaje(g: &Grilla, p: &ParametrosLibro, girada: bool) -> (Montaje, Option<St
 
 /// Reparte las páginas en firmas: las grandes primero y el resto en firmas
 /// menores (al final si son alzadas, al centro si son anidadas).
+/// Completa una lista de cuadernillos escrita a mano hasta cubrir `paginas`:
+/// repite el último tamaño y cierra con los más chicos que cuadren.
+pub fn completar_cuadernillos(escritos: &[u32], paginas: u32) -> Vec<u32> {
+    let Some(&ultimo) = escritos.last() else { return Vec::new() };
+    let suma: u32 = escritos.iter().sum();
+    let mut lista = escritos.to_vec();
+    if suma < paginas {
+        lista.extend(repartir((paginas - suma).div_ceil(4) * 4, ultimo));
+    }
+    lista
+}
+
+/// «12 de 16 + 1 de 8 + 1 de 4».
+pub fn resumen_cuadernillos(lista: &[u32]) -> String {
+    let mut partes: Vec<(u32, usize)> = Vec::new();
+    for &n in lista {
+        match partes.iter_mut().find(|(t, _)| *t == n) {
+            Some((_, k)) => *k += 1,
+            None => partes.push((n, 1)),
+        }
+    }
+    partes.sort_by_key(|p| std::cmp::Reverse(p.0));
+    partes.iter().map(|(n, k)| format!("{k} de {n}")).collect::<Vec<_>>().join(" + ")
+}
+
 fn repartir(total: u32, mayor: u32) -> Vec<u32> {
     let mut firmas = vec![mayor; (total / mayor) as usize];
     let mut resto = total % mayor;
@@ -375,22 +400,20 @@ pub fn planificar(original: &ParametrosLibro) -> Resultado<PlanLibro> {
     if !p.mapa.is_empty() && p.mapa.len() != p.paginas as usize {
         return Err(Error::Invalido("el mapa de páginas no coincide con las páginas de la tripa".into()));
     }
-    let manual: u32 = p.cuadernillos.iter().sum();
-    if !p.cuadernillos.is_empty() {
-        if let Some(n) = p.cuadernillos.iter().find(|n| !TAMANOS_FIRMA.contains(n)) {
-            return Err(Error::Invalido(format!("cuadernillo de {n} páginas: use 4, 8, 16, 32 o 64")));
-        }
-        if manual < p.paginas {
-            return Err(Error::Invalido(format!(
-                "los cuadernillos suman {manual} páginas y la tripa tiene {}; faltan {}",
-                p.paginas,
-                p.paginas - manual
-            )));
-        }
+    if let Some(n) = p.cuadernillos.iter().find(|n| !TAMANOS_FIRMA.contains(n)) {
+        return Err(Error::Invalido(format!("cuadernillo de {n} páginas: use 4, 8, 16, 32 o 64")));
     }
-    let paginas_libro = if p.cuadernillos.is_empty() { p.paginas.div_ceil(4) * 4 } else { manual };
+    // Cuadernillos a mano que no alcanzan: se completan con el último tamaño
+    // escrito y se cierra con los más chicos que cuadren (p. ej. «16» para
+    // 204 páginas: 12 de 16 + 1 de 8 + 1 de 4).
+    let cuadernillos = completar_cuadernillos(&p.cuadernillos, p.paginas);
+    let manual: u32 = cuadernillos.iter().sum();
+    let paginas_libro = if cuadernillos.is_empty() { p.paginas.div_ceil(4) * 4 } else { manual };
     let blancas = paginas_libro - p.paginas;
     let mut avisos: Vec<String> = aviso_marcas.into_iter().collect();
+    if cuadernillos.len() > p.cuadernillos.len() {
+        avisos.push(format!("cuadernillos completados para cuadrar la tripa: {}", resumen_cuadernillos(&cuadernillos)));
+    }
     if blancas > 0 {
         avisos.push(format!("se agregan {blancas} páginas en blanco al final para completar los cuadernillos"));
     }
@@ -420,7 +443,7 @@ pub fn planificar(original: &ParametrosLibro) -> Resultado<PlanLibro> {
     {
         avisos.push(aviso);
     }
-    let tamanos = if p.cuadernillos.is_empty() { repartir(paginas_libro, mayor) } else { p.cuadernillos.clone() };
+    let tamanos = if cuadernillos.is_empty() { repartir(paginas_libro, mayor) } else { cuadernillos };
     let numeracion = numerar(&tamanos, paginas_libro, p.encuadernacion.anidada());
 
     let creep = |pagina: u32| -> f64 {
@@ -679,6 +702,19 @@ fn marcas_plegado(celdas: &[Rect], cortes: &[Rect], rebase: f64, op: &OpcionesMa
 mod pruebas {
     use super::*;
 
+    #[test]
+    fn cuadernillos_que_cuadran() {
+        // «16» para 204 páginas: cierra con uno de 8 y uno de 4, sin blancas de más.
+        assert_eq!(completar_cuadernillos(&[16], 204), [vec![16; 12], vec![8, 4]].concat());
+        // 206 no es múltiplo de 4: quedan 2 blancas (13 de 16 = 208).
+        assert_eq!(completar_cuadernillos(&[16], 206).iter().sum::<u32>(), 208);
+        // «8» repite cuadernillos de 8; una lista que ya alcanza queda igual.
+        assert_eq!(completar_cuadernillos(&[8], 20), vec![8, 8, 4]);
+        assert_eq!(completar_cuadernillos(&[16, 16], 30), vec![16, 16]);
+        assert!(completar_cuadernillos(&[], 30).is_empty());
+        assert_eq!(resumen_cuadernillos(&[16, 16, 8, 4]), "2 de 16 + 1 de 8 + 1 de 4");
+    }
+
     fn libro(paginas: u32, encuadernacion: Encuadernacion) -> ParametrosLibro {
         ParametrosLibro {
             pliego: Tamano::new(720.0, 520.0),
@@ -910,9 +946,12 @@ mod pruebas {
         let mut usadas: Vec<usize> = plan.caras.iter().flat_map(|c| c.ubicaciones.iter().map(|u| u.pagina)).collect();
         usadas.sort_unstable();
         assert_eq!(usadas, (2..42).collect::<Vec<_>>());
-        // Si los cuadernillos no alcanzan, error claro; si sobran, páginas en blanco.
+        // Si los cuadernillos no alcanzan, se completan con los más chicos que
+        // cuadren; si sobran, páginas en blanco.
         p.cuadernillos = vec![16, 16];
-        assert!(planificar(&p).is_err());
+        let plan = planificar(&p).unwrap();
+        assert_eq!(plan.firmas.iter().map(|f| f.paginas).collect::<Vec<_>>(), [16, 16, 8]);
+        assert_eq!(plan.blancas, 0);
         p.cuadernillos = vec![16, 16, 16];
         assert_eq!(planificar(&p).unwrap().blancas, 8);
         p.cuadernillos = vec![16, 12, 12];
