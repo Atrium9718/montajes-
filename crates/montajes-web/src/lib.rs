@@ -194,6 +194,11 @@ fn marcas(con_marcas: bool, tira_color: bool) -> OpcionesMarcas {
     m
 }
 
+/// Marcas para piezas y libros: con `en_margen`, van en el margen del pliego.
+fn marcas_trabajo(con_marcas: bool, tira_color: bool, en_margen: bool) -> OpcionesMarcas {
+    OpcionesMarcas { en_margen: en_margen && con_marcas, ..marcas(con_marcas, tira_color) }
+}
+
 fn por_defecto_verdadero() -> bool {
     true
 }
@@ -340,6 +345,9 @@ struct PeticionNup {
     /// exterior (la primera página de cada par), sin escalar.
     #[serde(default)]
     pliegues: Vec<f64>,
+    /// Marcas, tira y rótulo en el margen del pliego (no se les reserva espacio).
+    #[serde(default)]
+    marcas_en_margen: bool,
 }
 
 fn tres() -> f64 {
@@ -383,7 +391,7 @@ fn plan_nup(p: &PeticionNup) -> R<(ParametrosNup, Distribucion, Vec<Cara>)> {
             rebase: p.rebase,
             calle: p.calle,
             orientacion: p.orientacion,
-            marcas: marcas(p.marcas, p.tira_color),
+            marcas: marcas_trabajo(p.marcas, p.tira_color, p.marcas_en_margen),
         };
         match nup::calcular(&par) {
             Ok(d) => {
@@ -696,6 +704,9 @@ struct PeticionLibro {
     formato: Tamano,
     paginas: u32,
     encuadernacion: Encuadernacion,
+    /// Marcas, tira y rótulo en el margen del pliego (no se les reserva espacio).
+    #[serde(default)]
+    marcas_en_margen: bool,
     #[serde(default)]
     firma: Option<u32>,
     #[serde(default)]
@@ -776,7 +787,7 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
         refile: p.refile,
         calibre_mm: p.calibre_um.map(|c| c / 1000.0),
         derecha_a_izquierda: p.derecha_a_izquierda,
-        marcas: marcas(p.marcas, p.tira_color),
+        marcas: marcas_trabajo(p.marcas, p.tira_color, p.marcas_en_margen),
         aprovechamiento: p.aprovechamiento,
         cuadernillos: p.cuadernillos.clone(),
         mapa: p.mapa.clone(),

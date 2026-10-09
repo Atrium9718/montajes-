@@ -17,11 +17,16 @@ pub struct OpcionesMarcas {
     pub desfase: f64,
     pub registro: bool,
     pub tira_color: bool,
+    /// Marcas, tira de control y rótulo dentro del margen del pliego (fuera
+    /// del área imprimible): las piezas llegan con su rebase hasta el borde
+    /// del área y no se reserva espacio para las marcas.
+    #[serde(default)]
+    pub en_margen: bool,
 }
 
 impl Default for OpcionesMarcas {
     fn default() -> Self {
-        Self { corte: true, largo: 5.0, desfase: 3.0, registro: true, tira_color: true }
+        Self { corte: true, largo: 5.0, desfase: 3.0, registro: true, tira_color: true, en_margen: false }
     }
 }
 
@@ -37,7 +42,7 @@ impl OpcionesMarcas {
 
     /// Franja que hay que reservar alrededor del bloque de piezas.
     pub fn espacio_necesario(&self, rebase: f64) -> f64 {
-        if self.corte || self.registro { self.distancia(rebase) + self.largo } else { rebase }
+        if (self.corte || self.registro) && !self.en_margen { self.distancia(rebase) + self.largo } else { rebase }
     }
 }
 
@@ -112,6 +117,8 @@ const PARCHES: [[f64; 4]; 12] = [
     [0.5, 0.4, 0.4, 0.0],
 ];
 const LADO_PARCHE: f64 = 5.0;
+/// Parches más chicos para que la tira quepa en el margen de 1 cm.
+const LADO_TIRA_MARGEN: f64 = 3.0;
 
 /// Valores únicos ordenados (con tolerancia de 1 µm).
 fn unicos(mut v: Vec<f64>) -> Vec<f64> {
@@ -140,14 +147,27 @@ pub fn generar(cortes: &[Rect], pliego: Tamano, area: &Rect, rebase: f64, op: &O
     let xs = unicos(cortes.iter().flat_map(|r| [r.x, r.derecha()]).collect());
     let ys = unicos(cortes.iter().flat_map(|r| [r.y, r.arriba()]).collect());
 
+    // En el margen: las marcas no pasan de 1 mm del borde del pliego y, en la
+    // cola, dejan libre la franja de la tira de control.
+    let cola_libre = if op.en_margen && op.tira_color { LADO_TIRA_MARGEN + 1.5 } else { 1.0 };
+    let (abajo, arriba, izquierda, derecha) = if op.en_margen {
+        (
+            (b.y - d - op.largo).max(1.0),
+            (b.arriba() + d + op.largo).min(pliego.alto - cola_libre),
+            (b.x - d - op.largo).max(1.0),
+            (b.derecha() + d + op.largo).min(pliego.ancho - 1.0),
+        )
+    } else {
+        (b.y - d - op.largo, b.arriba() + d + op.largo, b.x - d - op.largo, b.derecha() + d + op.largo)
+    };
     if op.corte {
         for &x in &xs {
-            m.corte.push(Linea { x1: x, y1: b.y - d - op.largo, x2: x, y2: b.y - d });
-            m.corte.push(Linea { x1: x, y1: b.arriba() + d, x2: x, y2: b.arriba() + d + op.largo });
+            m.corte.push(Linea { x1: x, y1: abajo, x2: x, y2: b.y - d });
+            m.corte.push(Linea { x1: x, y1: b.arriba() + d, x2: x, y2: arriba });
         }
         for &y in &ys {
-            m.corte.push(Linea { x1: b.x - d - op.largo, y1: y, x2: b.x - d, y2: y });
-            m.corte.push(Linea { x1: b.derecha() + d, y1: y, x2: b.derecha() + d + op.largo, y2: y });
+            m.corte.push(Linea { x1: izquierda, y1: y, x2: b.x - d, y2: y });
+            m.corte.push(Linea { x1: b.derecha() + d, y1: y, x2: derecha, y2: y });
         }
     }
 
@@ -170,7 +190,24 @@ pub fn generar(cortes: &[Rect], pliego: Tamano, area: &Rect, rebase: f64, op: &O
         }
     }
 
-    if op.tira_color {
+    if op.tira_color && op.en_margen {
+        // En el margen de la cola, pegada al borde del pliego.
+        let lado = LADO_TIRA_MARGEN;
+        let y = pliego.alto - 1.0 - lado;
+        let (x0, x1) = (1.0, pliego.ancho - 1.0);
+        if y >= b.arriba() + d && x1 - x0 >= lado * PARCHES.len() as f64 {
+            let cantidad = ((x1 - x0) / lado).floor() as usize;
+            let inicio = x0 + (x1 - x0 - cantidad as f64 * lado) / 2.0;
+            for i in 0..cantidad {
+                m.tira_color.push(Parche {
+                    rect: Rect::new(inicio + i as f64 * lado, y, lado, lado),
+                    cmyk: PARCHES[i % PARCHES.len()],
+                });
+            }
+        } else {
+            m.avisos.push("sin espacio en el margen de la cola para la tira de color".into());
+        }
+    } else if op.tira_color {
         // En la cola (arriba), entre las marcas y el límite imprimible.
         let y = b.arriba() + op.espacio_necesario(rebase) + 1.0;
         let x0 = area.x.max(0.0);
@@ -189,7 +226,22 @@ pub fn generar(cortes: &[Rect], pliego: Tamano, area: &Rect, rebase: f64, op: &O
         }
     }
 
-    if op.corte {
+    if op.corte && op.en_margen {
+        // En el margen: a la izquierda (o a la derecha), pegado al borde del pliego.
+        let h = ALTO_ROTULO;
+        let libre_izq = b.x - d - op.largo;
+        let libre_der = pliego.ancho - (b.derecha() + d + op.largo);
+        m.rotulo = if libre_izq >= h + 1.5 {
+            Some(Rotulo { x: 1.0 + h, y: b.y, alto: h, largo: b.alto, vertical: true })
+        } else if libre_der >= h + 1.5 {
+            Some(Rotulo { x: pliego.ancho - 1.0, y: b.y, alto: h, largo: b.alto, vertical: true })
+        } else {
+            None
+        };
+        if m.rotulo.is_none() {
+            m.avisos.push("sin espacio en el margen para el rótulo de la plancha".into());
+        }
+    } else if op.corte {
         m.rotulo = lugar_rotulo(&b, pliego, area, &m, op.espacio_necesario(rebase));
         if m.rotulo.is_none() {
             m.avisos.push("sin espacio para el rótulo de la plancha".into());
@@ -246,6 +298,27 @@ mod pruebas {
         assert!(m.registro.iter().any(|r| (r.y - 45.0).abs() < 1e-9));
         // El registro de arriba/abajo esquiva la línea x = 110.
         assert!(m.registro.iter().all(|r| (r.x - 110.0).abs() > 1e-6));
+    }
+
+    #[test]
+    fn marcas_dentro_del_margen() {
+        // Pliego de 500 × 350 con 1 cm de margen; las piezas (con 3 mm de rebase)
+        // llegan hasta el borde del área: corte a 13 mm del borde del pliego.
+        let op = OpcionesMarcas { en_margen: true, ..OpcionesMarcas::default() };
+        assert_eq!(op.espacio_necesario(3.0), 3.0);
+        let cortes = [Rect::new(13.0, 13.0, 237.0, 324.0), Rect::new(250.0, 13.0, 237.0, 324.0)];
+        let area = Rect::new(10.0, 10.0, 480.0, 330.0);
+        let m = generar(&cortes, Tamano::new(500.0, 350.0), &area, 3.0, &op);
+        let dentro = |x: f64, y: f64| (0.99..=499.01).contains(&x) && (0.99..=349.01).contains(&y);
+        assert!(m.corte.iter().all(|l| dentro(l.x1, l.y1) && dentro(l.x2, l.y2)));
+        // La tira, pegada a la cola y sin pisar las marcas.
+        assert!(!m.tira_color.is_empty());
+        let marcas_arriba = m.corte.iter().map(|l| l.y2.max(l.y1)).fold(0.0, f64::max);
+        assert!(m.tira_color.iter().all(|p| p.rect.y >= marcas_arriba && p.rect.arriba() <= 349.0));
+        // El rótulo, vertical a la izquierda, dentro del margen.
+        let r = m.rotulo.expect("rótulo");
+        assert!(r.vertical && r.x - r.alto >= 1.0 && r.x <= 10.0);
+        assert!(m.avisos.is_empty(), "{:?}", m.avisos);
     }
 
     #[test]

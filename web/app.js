@@ -348,11 +348,21 @@ function selectorMaquina(id) {
   return `<label class="campo"><span>Máquina</span>
     <select id="${id}">${estado.maquinas.map((m) => `<option value="${esc(m.id)}" ${m.id === elegida ? "selected" : ""}>${esc(m.nombre)} · ${mm(m.pliego_max.ancho, 0)}×${mm(m.pliego_max.alto, 0)}</option>`).join("")}</select></label>`;
 }
+const margenDe = (o) => (o?.margen === "maquina" ? "maquina" : "1cm");
+function campoMargen(o) {
+  return `<div class="campo"><span>Margen del pliego</span>${chips("margen", [["1cm", "1 cm por lado"], ["maquina", "Según la máquina"]], margenDe(o))}
+    <small>${margenDe(o) === "1cm" ? "Solo 1 cm libre en cada borde: ahí van las marcas de corte y registro, la tira de control y el rótulo; las piezas llegan con su rebase hasta ese centímetro." : "Los márgenes de la máquina (pinza, cola y laterales) y las marcas por dentro de ellos."}</small></div>`;
+}
 /** Máquina elegida, con la pinza que se haya puesto para este trabajo (vale solo para esa máquina). */
 function maquinaElegida(id) {
   const m = estado.maquinas.find((x) => x.id === ($(`#${id}`)?.value ?? estado.preferencias.maquina)) || estado.maquinas[0];
   const o = id === "pz-maquina" ? estado.piezas.op : id === "lb-maquina" ? estado.libro.op : null;
-  return m && o?.pinza != null && o.pinzaDe === m.id ? { ...m, pinza: o.pinza } : m;
+  if (!m || !o) return m;
+  const pinza = o.pinza != null && o.pinzaDe === m.id ? o.pinza : null;
+  // «1 cm por lado»: el margen del pliego es 1 cm en los cuatro lados (la
+  // pinza, si se cambió para el trabajo, manda) y las marcas van en él.
+  if (margenDe(o) === "1cm") return { ...m, pinza: pinza ?? 10, cola: 10, lateral: 10 };
+  return pinza != null ? { ...m, pinza } : m;
 }
 
 function zonaArchivo(id, texto) {
@@ -1313,6 +1323,7 @@ function vistaPiezas(main) {
           ${o.modo === "repetir" ? bloquePlegable(t) : ""}
           ${campoEscala("pz", o, t.info?.formato)}
           ${selectorPapel("pz", o, maquinaElegida("pz-maquina"), null)}
+          ${campoMargen(o)}
           ${interruptor("pz-dorso", "Frente y dorso (páginas en pares)", o.dorso)}
           ${o.dorso ? `<div class="campo"><span>Volteo del pliego</span>${chips("volteo", [["lateral", "Tira y retira (lateral)"], ["cabeza", "De cabeza (tumble)"]], o.volteo)}</div>` : ""}
           ${campoTintas(o, o.dorso)}
@@ -1442,6 +1453,7 @@ function peticionPiezas(maquina, info, orientacion) {
     dorso: o.dorso, volteo: o.volteo, marcas: o.marcas, tira_color: o.tira,
     titulo: base(estado.piezas.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
     pliegues: o.modo === "repetir" ? plegableDe(o, info.formato)?.pliegues || [] : [],
+    marcas_en_margen: margenDe(o) === "1cm",
   };
 }
 
@@ -2051,6 +2063,7 @@ function vistaLibro(main) {
           ${chips("encuadernacion", [["caballete", "Caballete"], ["lomo", "Al lomo (PUR)"], ["cosido", "Cosido"]], o.encuadernacion)}
           ${selectorMaquina("lb-maquina")}
           ${selectorPapel("lb", o, maquinaElegida("lb-maquina"), papeles.find((p) => p.id === papelElegido))}
+          ${campoMargen(o)}
           ${campoTintas(o, true)}
           <label class="campo"><span>Papel de la tripa</span>
             <select id="lb-papel"><option value="">Sin papel (no calcula creep ni lomo)</option>${papeles.map((p) => `<option value="${esc(p.id)}" ${p.id === papelElegido ? "selected" : ""}>${esc(p.nombre)} · ${p.calibre_um} µm</option>`).join("")}</select>
@@ -2132,7 +2145,7 @@ function peticionLibro(maquina, info) {
   const tripa = tripaDe(estado.libro);
   const enOrden = tripa.length === info.paginas.length;
   return {
-    maquina, formato: formatoTripa(estado.libro), paginas: tripa.length, encuadernacion: o.encuadernacion,
+    maquina, formato: formatoTripa(estado.libro), paginas: tripa.length, encuadernacion: o.encuadernacion, marcas_en_margen: margenDe(o) === "1cm",
     mapa: enOrden ? [] : tripa, cuadernillos: armadoDe(o, maquina) === "sueltas" ? [] : cuadernillosDe(o, tripa.length),
     firma: armadoDe(o, maquina) === "sueltas" ? 4 : o.firma === "auto" ? null : Number(o.firma), rebase: o.rebase, fresado: o.fresado, refile: o.refile,
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
