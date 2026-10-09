@@ -13,7 +13,9 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat, dictio
 
 use crate::catalogo::VersionPdfx;
 use crate::codigo_barras::CodigoBarras;
-use crate::correcciones::{Conteo, Correcciones, FormaPendiente, corregir_flujo, recursos_con_sobreimpresion};
+use crate::correcciones::{
+    Conteo, Correcciones, FormaPendiente, ModoRebase, corregir_flujo, recursos_con_sobreimpresion,
+};
 use crate::geometria::{Rect, Tamano};
 use crate::imposicion::Cara;
 use crate::imposicion::marcas::Marcas;
@@ -520,7 +522,24 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
             let falta = pide.map(|v| v > tiene + 0.01);
             let estirado = corr.rebase_estirado || corr.rebase_fondo;
             let fondo = if corr.rebase_fondo { corr.fondos.get(u.pagina).copied().flatten() } else { None };
-            if let Some(colores) = fondo {
+            // Lados del pliego (izquierda, abajo, derecha, arriba) → lado de la
+            // página, que va girada `giro` grados.
+            let lado_pagina = |lado_pliego: usize| {
+                let ciclo = [0usize, 3, 2, 1]; // horario: izquierda, arriba, derecha, abajo
+                let pos = ciclo.iter().position(|l| *l == lado_pliego).unwrap_or(0);
+                ciclo[(pos + 4 - (giro / 90) as usize % 4) % 4]
+            };
+            if let Some(modos) = corr.modos.get(u.pagina).copied().flatten().filter(|_| pide.iter().any(|v| *v > 0.01))
+            {
+                // Rebase decidido por borde (lo elige la app mirando la página).
+                espejos += 1;
+                let colores = corr.fondos.get(u.pagina).copied().flatten();
+                let lados: [usize; 4] = std::array::from_fn(lado_pagina);
+                let modo = lados.map(|l| modos[l]);
+                let color = lados.map(|l| colores.map(|c| c[l]));
+                let tiene = p.rebase_disponible() * s;
+                colocar_por_lados(&mut contenido, c, r, pide, tiene, modo, color, &m, &nombre, opciones.icc.is_some());
+            } else if let Some(colores) = fondo {
                 // Rebase solo con el fondo: franjas del color medido junto a cada
                 // borde (girado como la página) y la página recortada al corte.
                 espejos += 1;
@@ -961,6 +980,146 @@ pub fn documento_plantilla_portada(c: &Portada, titulo: &str, nota: &str, isbn: 
 }
 
 /// Dibuja la página `nombre` recortada a `zona` (mm) con la matriz `m` (pt).
+/// Coloca una página con el rebase de cada borde hecho a su manera (lados en
+/// el pliego: izquierda, abajo, derecha, arriba):
+/// 1. franjas en espejo o estiradas, debajo de la página;
+/// 2. la página, con el rebase original donde se usa y un pase mínimo donde no;
+/// 3. franjas de color plano encima, desde el corte hacia afuera.
+#[allow(clippy::too_many_arguments)]
+fn colocar_por_lados(
+    contenido: &mut String,
+    c: Rect,
+    r: Rect,
+    pide: [f64; 4],
+    tiene: f64,
+    modo: [ModoRebase; 4],
+    color: [Option<[f32; 3]>; 4],
+    m: &[f64; 6],
+    nombre: &str,
+    cmyk: bool,
+) {
+    let hace = pide.map(|v| v > 0.01);
+    // Sin rebase suficiente en el PDF, «original» pasa a espejo; sin color, a estirar.
+    let modo: [ModoRebase; 4] = std::array::from_fn(|l| match modo[l] {
+        ModoRebase::Original if pide[l] > tiene + 0.05 => ModoRebase::Espejo,
+        ModoRebase::Color if color[l].is_none() => ModoRebase::Estirar,
+        otro => otro,
+    });
+    let original = std::array::from_fn::<bool, 4, _>(|l| hace[l] && modo[l] == ModoRebase::Original);
+    let reflejo =
+        std::array::from_fn::<bool, 4, _>(|l| hace[l] && matches!(modo[l], ModoRebase::Espejo | ModoRebase::Estirar));
+    let plano = std::array::from_fn::<bool, 4, _>(|l| hace[l] && modo[l] == ModoRebase::Color);
+
+    // Transformación (en el pliego) que lleva la página a la franja de un lado.
+    let (x0, y0, x1, y1) = (mm_a_pt(c.x), mm_a_pt(c.y), mm_a_pt(c.derecha()), mm_a_pt(c.arriba()));
+    let e = mm_a_pt(ORILLA);
+    let transformar = |lado: usize| -> [f64; 6] {
+        let (borde, signo, horizontal) = match lado {
+            0 => (x0, 1.0, true),
+            2 => (x1, -1.0, true),
+            1 => (y0, 1.0, false),
+            _ => (y1, -1.0, false),
+        };
+        let (k, t) = if modo[lado] == ModoRebase::Estirar {
+            // La orilla [borde, borde + signo·e] se estira hasta cubrir el rebase.
+            let fijo = borde + signo * e;
+            let k = (e + mm_a_pt(pide[lado])) / e;
+            (k, fijo * (1.0 - k))
+        } else {
+            (-1.0, 2.0 * borde)
+        };
+        if horizontal { [k, 0.0, 0.0, 1.0, t, 0.0] } else { [1.0, 0.0, 0.0, k, 0.0, t] }
+    };
+
+    // 1. Franjas reflejadas o estiradas (debajo). A lo largo del borde se
+    //    alargan sobre los lados vecinos que usan el rebase original.
+    let [pi, pb, pd, pa] = pide;
+    let alto_y = |l_abajo: bool, l_arriba: bool| {
+        let y = if l_abajo { r.y } else { c.y };
+        let y2 = if l_arriba { r.arriba() } else { c.arriba() };
+        (y, y2 - y)
+    };
+    let ancho_x = |l_izq: bool, l_der: bool| {
+        let x = if l_izq { r.x } else { c.x };
+        let x2 = if l_der { r.derecha() } else { c.derecha() };
+        (x, x2 - x)
+    };
+    let (vy, valto) = alto_y(original[1], original[3]);
+    let (hx, hancho) = ancho_x(original[0], original[2]);
+    let franjas = [
+        (0, Rect::new(r.x, vy, pi + SOLAPE, valto)),
+        (2, Rect::new(c.derecha() - SOLAPE, vy, pd + SOLAPE, valto)),
+        (1, Rect::new(hx, r.y, hancho, pb + SOLAPE)),
+        (3, Rect::new(hx, c.arriba() - SOLAPE, hancho, pa + SOLAPE)),
+    ];
+    for (lado, zona) in franjas {
+        if reflejo[lado] {
+            colocar(contenido, zona, &multiplicar(m, &transformar(lado)), nombre);
+        }
+    }
+    // Esquinas entre dos franjas reflejadas: las dos transformaciones.
+    for (v, h, zona) in [
+        (0, 1, Rect::new(r.x, r.y, pi, pb)),
+        (2, 1, Rect::new(c.derecha(), r.y, pd, pb)),
+        (0, 3, Rect::new(r.x, c.arriba(), pi, pa)),
+        (2, 3, Rect::new(c.derecha(), c.arriba(), pd, pa)),
+    ] {
+        if reflejo[v] && reflejo[h] {
+            let mt = multiplicar(&multiplicar(m, &transformar(v)), &transformar(h));
+            colocar(contenido, zona, &mt, nombre);
+        }
+    }
+
+    // 2. La página.
+    let pase: [f64; 4] = std::array::from_fn(|l| {
+        if original[l] {
+            pide[l]
+        } else if hace[l] {
+            pide[l].min(PASE)
+        } else {
+            0.0
+        }
+    });
+    colocar(contenido, c.expandir(pase[0], pase[1], pase[2], pase[3]), m, nombre);
+
+    // 3. Color plano encima (también tapa las esquinas que le tocan).
+    let bandas = [
+        (0, Rect::new(r.x, r.y, pi, r.alto)),
+        (2, Rect::new(c.derecha(), r.y, pd, r.alto)),
+        (1, Rect::new(r.x, r.y, r.ancho, pb)),
+        (3, Rect::new(r.x, c.arriba(), r.ancho, pa)),
+    ];
+    for (lado, zona) in bandas {
+        let Some([rr, gg, bb]) = color[lado].filter(|_| plano[lado]) else { continue };
+        if zona.ancho <= 1e-6 || zona.alto <= 1e-6 {
+            continue;
+        }
+        let (rr, gg, bb) = (f64::from(rr), f64::from(gg), f64::from(bb));
+        let pintura = if cmyk {
+            let (cc, mm_, yy, kk) = rgb_a_cmyk(rr, gg, bb);
+            format!("{} {} {} {} k", n(cc), n(mm_), n(yy), n(kk))
+        } else {
+            format!("{} {} {} rg", n(rr), n(gg), n(bb))
+        };
+        // En las esquinas, la franja horizontal solo cubre lo que no es de
+        // una franja de color vertical (que ya va completa).
+        let zona = if lado == 1 || lado == 3 {
+            let x = if plano[0] { c.x } else { r.x };
+            let x2 = if plano[2] { c.derecha() } else { r.derecha() };
+            Rect::new(x, zona.y, x2 - x, zona.alto)
+        } else {
+            zona
+        };
+        contenido.push_str(&format!(
+            "q {pintura} {} {} {} {} re f Q\n",
+            n(mm_a_pt(zona.x)),
+            n(mm_a_pt(zona.y)),
+            n(mm_a_pt(zona.ancho)),
+            n(mm_a_pt(zona.alto))
+        ));
+    }
+}
+
 fn colocar(s: &mut String, zona: Rect, m: &[f64; 6], nombre: &str) {
     s.push_str(&format!(
         "q {} {} {} {} re W n {} {} {} {} {} {} cm /{} Do Q\n",
@@ -1239,6 +1398,33 @@ fn xmp(titulo: &str, fecha: &Fecha, pdfx: Option<&str>, id: &str) -> String {
 #[cfg(test)]
 mod pruebas {
     use super::*;
+
+    #[test]
+    fn rebase_por_lados() {
+        // Pieza de 100×50 con 3 mm de rebase pedido en los cuatro lados.
+        let c = Rect::new(10.0, 10.0, 100.0, 50.0);
+        let r = c.expandir(3.0, 3.0, 3.0, 3.0);
+        let m = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let gris = Some([0.5f32, 0.5, 0.5]);
+        let mut s = String::new();
+        let modo = [ModoRebase::Espejo, ModoRebase::Original, ModoRebase::Color, ModoRebase::Estirar];
+        colocar_por_lados(&mut s, c, r, [3.0; 4], 3.0, modo, [gris; 4], &m, "P1", false);
+        let lineas: Vec<&str> = s.lines().collect();
+        // Espejo a la izquierda (escala −1 en x) y estirado arriba (escala y > 1).
+        assert!(lineas.iter().any(|l| l.contains(" -1 0 0 1 ")));
+        assert!(lineas.iter().any(|l| l.contains(" 1 0 0 11 ")));
+        // La página usa el rebase original abajo (3 mm) y un pase mínimo en el resto.
+        let pagina = format!("{} {} ", n(mm_a_pt(c.x - PASE)), n(mm_a_pt(c.y - 3.0)));
+        assert!(lineas.iter().any(|l| l.starts_with(&format!("q {pagina}")) && l.ends_with("/P1 Do Q")));
+        // El color va al final, encima, solo a la derecha.
+        let ultima = lineas.last().unwrap();
+        assert!(ultima.contains(" rg ") && ultima.contains(&n(mm_a_pt(c.derecha()))));
+        assert_eq!(lineas.iter().filter(|l| l.contains(" rg ")).count(), 1);
+        // «Original» sin rebase suficiente en el PDF pasa a espejo.
+        let mut t = String::new();
+        colocar_por_lados(&mut t, c, r, [3.0; 4], 1.0, [ModoRebase::Original; 4], [None; 4], &m, "P1", false);
+        assert_eq!(t.lines().filter(|l| l.contains(" -1 ") || l.contains("0 0 -1")).count(), 8);
+    }
 
     /// Aplica la matriz a un punto.
     fn aplicar(m: &[f64; 6], x: f64, y: f64) -> (f64, f64) {

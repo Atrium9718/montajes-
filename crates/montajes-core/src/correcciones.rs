@@ -41,6 +41,25 @@ pub struct Correcciones {
     /// en orden izquierda, abajo, derecha, arriba. Lo mide la app.
     #[serde(default)]
     pub fondos: Vec<Option<[[f32; 3]; 4]>>,
+    /// Cómo se hace el rebase en cada borde de cada página del PDF (mismo
+    /// orden que `fondos`). Lo decide la app mirando la página; si hay modos
+    /// para una página, mandan sobre las opciones de rebase de arriba.
+    #[serde(default)]
+    pub modos: Vec<Option<[ModoRebase; 4]>>,
+}
+
+/// Rebase de un borde.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModoRebase {
+    /// El que trae el PDF (si alcanza; si no, espejo).
+    Original,
+    /// Reflejo de la orilla: sigue degradados y texturas.
+    Espejo,
+    /// Estirar la última orilla de la página.
+    Estirar,
+    /// Color plano del fondo junto a ese borde (ver `fondos`; sin color, estirar).
+    Color,
 }
 
 impl Correcciones {
@@ -53,6 +72,7 @@ impl Correcciones {
             rebase_estirado: false,
             rebase_fondo: false,
             fondos: Vec::new(),
+            modos: Vec::new(),
         }
     }
 
@@ -66,6 +86,7 @@ impl Correcciones {
             rebase_estirado: true,
             rebase_fondo: false,
             fondos: Vec::new(),
+            modos: Vec::new(),
         }
     }
 
