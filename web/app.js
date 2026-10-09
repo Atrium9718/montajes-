@@ -691,7 +691,7 @@ function modosPagina(trabajo, i) {
 
 /** Correcciones para generar: colores del fondo y modo de rebase de cada borde. */
 async function correccionesParaGenerar(trabajo, indices) {
-  const c = correcciones();
+  const c = { ...correcciones(), ...tintasDe(trabajo.op) };
   if (trabajo.archivo && trabajo.info) {
     try { c.fondos = await medirFondos(trabajo, indices); } catch (e) { console.warn("No se pudo medir el fondo:", e); c.fondos = []; }
     const usadas = new Set(indices);
@@ -801,6 +801,11 @@ function svgCara(cara, maquina, opciones = {}) {
   }
   if (cara.cajas && guias) partes.push(r(cara.cajas.sangrado, `fill="none" stroke="#d93b2b" stroke-width="${W / 900}"`));
   const { info, mini } = opciones;
+  // Lado de la cara (como lo rotula el motor) y sus tintas: a una tinta, gris.
+  const nombreCara = cara.nombre.toLowerCase();
+  const esRetiro = !nombreCara.includes("tira y retira") && nombreCara.trim().endsWith("retiro");
+  const tintasCara = opciones.tintas ? (esRetiro ? opciones.tintas.tintas_retiro : nombreCara.includes("tira y retira") ? Math.max(opciones.tintas.tintas_tiro, opciones.tintas.tintas_retiro) : opciones.tintas.tintas_tiro) : 4;
+  const filtro = tintasCara === 1 ? ' style="filter:grayscale(1)"' : "";
   cara.ubicaciones.forEach((u, k) => {
     const color = COLORES[u.pagina % COLORES.length];
     const imagen = mini?.[u.pagina];
@@ -815,7 +820,7 @@ function svgCara(cara, maquina, opciones = {}) {
       const id = `rc-${opciones.clave || "c"}-${k}`;
       const imagenCon = (mt, zona, n) => {
         const tt = multiplicar(multiplicar([1, 0, 0, -1, vx0, vy1], mt), [1, 0, 0, -1, 0, H]);
-        partes.push(`<clipPath id="${id}-${n}">${r(zona)}</clipPath><g clip-path="url(#${id}-${n})"><image href="${imagen}" x="0" y="0" width="${vx1 - vx0}" height="${vy1 - vy0}" preserveAspectRatio="none" transform="matrix(${tt.map((v) => +v.toFixed(4)).join(" ")})"/></g>`);
+        partes.push(`<clipPath id="${id}-${n}">${r(zona)}</clipPath><g clip-path="url(#${id}-${n})"><image href="${imagen}" x="0" y="0" width="${vx1 - vx0}" height="${vy1 - vy0}" preserveAspectRatio="none"${filtro} transform="matrix(${tt.map((v) => +v.toFixed(4)).join(" ")})"/></g>`);
       };
       // El rebase de cada borde, igual que lo arma el motor (pdf::colocar_por_lados).
       const modos = opciones.modos?.(u.pagina);
@@ -829,7 +834,7 @@ function svgCara(cara, maquina, opciones = {}) {
         const [fx0, fy0, fx1, fy1] = capa.vista;
         const fondoCon = (mt, recorte, n) => {
           const tt = multiplicar(multiplicar([1, 0, 0, -1, fx0, fy1], mt), [1, 0, 0, -1, 0, H]);
-          partes.push(`<clipPath id="${id}-f${n}">${recorte}</clipPath><g clip-path="url(#${id}-f${n})"><image href="${capa.imagen}" x="0" y="0" width="${fx1 - fx0}" height="${fy1 - fy0}" preserveAspectRatio="none" transform="matrix(${tt.map((v) => +v.toFixed(4)).join(" ")})"/></g>`);
+          partes.push(`<clipPath id="${id}-f${n}">${recorte}</clipPath><g clip-path="url(#${id}-f${n})"><image href="${capa.imagen}" x="0" y="0" width="${fx1 - fx0}" height="${fy1 - fy0}" preserveAspectRatio="none"${filtro} transform="matrix(${tt.map((v) => +v.toFixed(4)).join(" ")})"/></g>`);
         };
         const hace = pide.map((v) => v > 0.01);
         const [pi, pb, pd, pa] = pide;
@@ -879,10 +884,22 @@ function svgCara(cara, maquina, opciones = {}) {
   for (const g of m.registro) partes.push(`<g stroke="${tinta}" stroke-width="${trazo}" fill="none"><circle cx="${g.x}" cy="${y(g.y)}" r="${g.radio * 0.6}"/><line x1="${g.x - g.radio}" y1="${y(g.y)}" x2="${g.x + g.radio}" y2="${y(g.y)}"/><line x1="${g.x}" y1="${y(g.y) - g.radio}" x2="${g.x}" y2="${y(g.y) + g.radio}"/></g>`);
   for (const p of m.tira_color) {
     const [c, mg, a, k] = p.cmyk;
-    const rgb = [(1 - c) * (1 - k), (1 - mg) * (1 - k), (1 - a) * (1 - k)].map((v) => Math.round(v * 255));
+    let rgb = [(1 - c) * (1 - k), (1 - mg) * (1 - k), (1 - a) * (1 - k)].map((v) => Math.round(v * 255));
+    // A una tinta la tira lleva solo negro (como pdf::dibujar_marcas).
+    if (tintasCara === 1) rgb = Array(3).fill(Math.round(0.3 * rgb[0] + 0.59 * rgb[1] + 0.11 * rgb[2]));
     partes.push(r(p.rect, `fill="rgb(${rgb})"`));
   }
   for (const a of m.alzado || []) partes.push(r(a, `fill="${tinta}"`));
+  // Rótulo de la plancha, como lo escribe el motor (pdf::dibujar_rotulo).
+  if (m.rotulo && opciones.titulo !== undefined) {
+    const ro = m.rotulo;
+    const colores = tintasCara === 1 ? [["NEGRO", "#1d1d1f"]] : [["CYAN", "#00a3e0"], ["MAGENTA", "#e5007e"], ["AMARILLO", "#f2d500"], ["NEGRO", "#1d1d1f"]];
+    const tspans = colores.map(([t, c], i) => `${i ? `<tspan fill="${tinta}"> / </tspan>` : ""}<tspan fill="${c}">${t}</tspan>`).join("");
+    const lado = opciones.ladoCara?.(cara) || "";
+    const yy = y(ro.y);
+    const giro = ro.vertical ? ` transform="rotate(-90 ${ro.x} ${yy})"` : "";
+    partes.push(`<text x="${ro.x}" y="${yy}" font-size="${ro.alto * 1.25}" font-family="ui-monospace, monospace" textLength="${Math.min(ro.largo, ro.alto * (colores.map(([t]) => t).join(" / ") + "   " + opciones.titulo + "   " + lado).length)}" lengthAdjust="spacingAndGlyphs"${giro}>${tspans}<tspan fill="${tinta}">   ${esc(opciones.titulo.toUpperCase())}   ${esc(lado)}</tspan></text>`);
+  }
   const etiqueta = `${esc(cara.nombre)}: pliego de ${mm(W, 0)} por ${mm(H, 0)} mm`;
   // El pliego se ve siempre horizontal (como se acostumbra en el taller): si va
   // vertical en la máquina, se gira 90° y la pinza queda a la izquierda.
@@ -909,7 +926,7 @@ function tarjetaVistaPrevia(trabajo, maquina, titulo, insignias = false) {
         <button class="boton boton-claro boton-chico" data-cara="${i + 1}" ${i === caras.length - 1 ? "disabled" : ""} aria-label="Pliego siguiente">→</button>
       </div>
     </div>
-    <div class="lienzo">${svgCara(caras[i], maquina, { info: trabajo.info, mini: trabajo.mini, insignias: insignias && guias, clave: i, guias, modos: (k) => modosPagina(trabajo, k), fondos: trabajo.fondos, extendido: modoRebase() === "extendido", miniFondo: trabajo.miniFondo })}</div>
+    <div class="lienzo">${svgCara(caras[i], maquina, { info: trabajo.info, mini: trabajo.mini, insignias: insignias && guias, clave: i, guias, modos: (k) => modosPagina(trabajo, k), fondos: trabajo.fondos, extendido: modoRebase() === "extendido", miniFondo: trabajo.miniFondo, tintas: tintasDe(trabajo.op), titulo: base(trabajo.archivo?.nombre) || "", ladoCara: (c) => ladosDe(caras).get(c) })}</div>
     <div class="leyenda">${chips("vista-guias", [["pdf", "Como queda el PDF"], ["guias", "Con guías"]], guias ? "guias" : "pdf")}
       ${guias ? `<span><i style="border-color:var(--tinta)"></i>Corte</span><span><i style="border-color:#c03ac0;border-top-style:dashed"></i>Pliegue</span><span><i style="border-color:var(--gris);border-top-style:dashed"></i>Área imprimible</span><span><i style="border-color:var(--naranja)"></i>Pinza</span>` : ""}</div>
   </section>`;
@@ -992,6 +1009,33 @@ function selectorPapel(prefijo, o, maquina, papel) {
  * Pinza: de qué lado del papel muerde (lado largo = papel horizontal en la
  * máquina; lado corto = vertical) y cuánto mide en este trabajo.
  */
+/** Tintas del tiro y del retiro: «4x4», «4x1», «1x1»… (a 1 tinta todo pasa a negro). */
+function campoTintas(o, conRetiro) {
+  const opciones = conRetiro
+    ? [["4x4", "4 × 4 · color los dos lados"], ["4x1", "4 × 1 · retiro en negro"], ["1x4", "1 × 4 · tiro en negro"], ["1x1", "1 × 1 · todo en negro"]]
+    : [["4x4", "Color (4 tintas)"], ["1x1", "Una tinta (negro)"]];
+  const valor = opciones.some(([v]) => v === o.tintas) ? o.tintas : conRetiro ? "4x4" : (o.tintas || "4x4").startsWith("1") ? "1x1" : "4x4";
+  return `<div class="campo"><span>Tintas${conRetiro ? " (tiro × retiro)" : ""}</span>${chips("tintas", opciones, valor)}
+    <small>Cada plancha sale rotulada con sus tintas (cada nombre en su color), el archivo y si es tiro o retiro. A una tinta, todo el diseño pasa a negro.</small></div>`;
+}
+/** «TIRO 1», «RETIRO 1»… de cada cara, como pdf::lados_de. */
+function ladosDe(caras) {
+  const mapa = new Map();
+  let n = 0;
+  for (const c of caras) {
+    const nombre = c.nombre.toLowerCase();
+    if (nombre.includes("tira y retira")) mapa.set(c, `TIRA Y RETIRA ${++n}`);
+    else if (nombre.trim().endsWith("retiro")) mapa.set(c, `RETIRO ${Math.max(n, 1)}`);
+    else mapa.set(c, `TIRO ${++n}`);
+  }
+  return mapa;
+}
+/** Tintas del tiro y del retiro de un trabajo. */
+function tintasDe(o) {
+  const [t, r] = String(o?.tintas || "4x4").split("x").map((v) => (v === "1" ? 1 : 4));
+  return { tintas_tiro: t, tintas_retiro: r ?? t };
+}
+
 function bloquePinza(prefijo, o, maquina) {
   const papel = pliegoDe(o, maquina) || maquina.pliego_max;
   const ambas = ambasOrientaciones(papel, maquina);
@@ -1208,6 +1252,7 @@ function vistaPiezas(main) {
           ${selectorPapel("pz", o, maquinaElegida("pz-maquina"), null)}
           ${interruptor("pz-dorso", "Frente y dorso (páginas en pares)", o.dorso)}
           ${o.dorso ? `<div class="campo"><span>Volteo del pliego</span>${chips("volteo", [["lateral", "Tira y retira (lateral)"], ["cabeza", "De cabeza (tumble)"]], o.volteo)}</div>` : ""}
+          ${campoTintas(o, o.dorso)}
           <details class="avanzado"><summary>Marcas y pliego</summary>
             <div class="paso">
               ${interruptor("pz-marcas", "Marcas de corte y registro", o.marcas)}
@@ -1823,6 +1868,7 @@ function vistaLibro(main) {
           ${chips("encuadernacion", [["caballete", "Caballete"], ["lomo", "Al lomo (PUR)"], ["cosido", "Cosido"]], o.encuadernacion)}
           ${selectorMaquina("lb-maquina")}
           ${selectorPapel("lb", o, maquinaElegida("lb-maquina"), papeles.find((p) => p.id === papelElegido))}
+          ${campoTintas(o, true)}
           <label class="campo"><span>Papel de la tripa</span>
             <select id="lb-papel"><option value="">Sin papel (no calcula creep ni lomo)</option>${papeles.map((p) => `<option value="${esc(p.id)}" ${p.id === papelElegido ? "selected" : ""}>${esc(p.nombre)} · ${p.calibre_um} µm</option>`).join("")}</select>
             ${papeles.length ? "" : `<small><a href="#catalogos">Agrega papeles</a> para calcular el lomo y el creep.</small>`}

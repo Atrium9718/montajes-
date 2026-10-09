@@ -502,13 +502,29 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
     // 3. Un pliego por cara.
     let arbol = doc.new_object_id();
     let mut hijos = Vec::with_capacity(caras.len());
-    for cara in caras {
+    let corr = &opciones.correcciones;
+    let lados = lados_de(caras);
+    let mut gris = crate::gris::Conversor::new();
+    let mut paginas_en_negro = std::collections::BTreeSet::new();
+    for (cara, (etiqueta, lado)) in caras.iter().zip(&lados) {
         let mut xobjetos = Dictionary::new();
         let mut contenido = String::new();
+        // A una tinta: la página (y su capa de fondo) en su copia en gris.
+        let tintas = match lado {
+            Lado::Tiro => corr.tintas_tiro,
+            Lado::Retiro => corr.tintas_retiro,
+            Lado::TiraRetira => corr.tintas_tiro.max(corr.tintas_retiro),
+        };
+        let negro = tintas == 1;
         for u in &cara.ubicaciones {
             let p = &paginas[u.pagina];
-            let nombre = format!("P{}", u.pagina + 1);
-            xobjetos.set(nombre.as_bytes(), Object::Reference(formas[&u.pagina]));
+            let (nombre, forma) = if negro {
+                paginas_en_negro.insert(u.pagina);
+                (format!("PN{}", u.pagina + 1), gris.forma(&mut doc, formas[&u.pagina]))
+            } else {
+                (format!("P{}", u.pagina + 1), formas[&u.pagina])
+            };
+            xobjetos.set(nombre.as_bytes(), Object::Reference(forma));
             let giro = (p.giro + u.giro) % 360;
             let mut m = matriz_colocacion(&p.corte, giro, mm_a_pt(u.corte.x), mm_a_pt(u.corte.y));
             let s = if u.escala > 0.0 { u.escala } else { 1.0 };
@@ -539,7 +555,11 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
             if let Some(fid) = fondo_pagina.filter(|_| pide.iter().any(|v| *v > 0.01)) {
                 // Rebase con la capa de fondo: la foto o el fondo siguen más allá del corte.
                 espejos += 1;
-                let nombre_fondo = format!("F{}", u.pagina + 1);
+                let (nombre_fondo, fid) = if negro {
+                    (format!("FN{}", u.pagina + 1), gris.forma(&mut doc, fid))
+                } else {
+                    (format!("F{}", u.pagina + 1), fid)
+                };
                 xobjetos.set(nombre_fondo.as_bytes(), Object::Reference(fid));
                 colocar_extendido(&mut contenido, c, r, pide, &m, &nombre, &nombre_fondo);
             } else if let Some(modos) =
@@ -655,7 +675,10 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                 colocar(&mut contenido, r, &m, &nombre);
             }
         }
-        dibujar_marcas(&cara.marcas, &mut contenido);
+        dibujar_marcas(&cara.marcas, &mut contenido, tintas);
+        if let Some(r) = cara.marcas.rotulo {
+            dibujar_rotulo(&mut contenido, &r, tintas, &opciones.titulo, etiqueta);
+        }
         informe.avisos.extend(cara.marcas.avisos.iter().map(|a| format!("{}: {a}", cara.nombre)));
 
         let flujo = doc.add_object(Stream::new(Dictionary::new(), contenido.into_bytes()));
@@ -680,6 +703,14 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
         hijos.push(Object::Reference(pagina));
     }
     informe.avisos.extend(conteo.avisos());
+    if !paginas_en_negro.is_empty() {
+        informe.avisos.push(format!(
+            "corregido: {} {} a una tinta (todo en negro)",
+            paginas_en_negro.len(),
+            if paginas_en_negro.len() == 1 { "página pasada" } else { "páginas pasadas" }
+        ));
+        informe.avisos.extend(gris.avisos.iter().map(|a| format!("a una tinta: {a}")));
+    }
     if espejos > 0 {
         informe.avisos.push(format!(
             "corregido: rebase generado {} en {espejos} ubicaciones sin rebase suficiente",
@@ -1296,10 +1327,93 @@ fn corregir_formas_anidadas(
     }
 }
 
-fn dibujar_marcas(m: &Marcas, s: &mut String) {
+/// Lado de un pliego según su nombre («… tiro», «… retiro», «tira y retira»).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lado {
+    Tiro,
+    Retiro,
+    TiraRetira,
+}
+
+/// Rótulo de lado de cada cara: «TIRO 1», «RETIRO 1», «TIRO 2»… (cada retiro
+/// lleva el número del tiro anterior).
+fn lados_de(caras: &[Cara]) -> Vec<(String, Lado)> {
+    let mut n = 0;
+    caras
+        .iter()
+        .map(|c| {
+            let nombre = c.nombre.to_lowercase();
+            if nombre.contains("tira y retira") {
+                n += 1;
+                (format!("TIRA Y RETIRA {n}"), Lado::TiraRetira)
+            } else if nombre.trim_end().ends_with("retiro") {
+                (format!("RETIRO {}", n.max(1)), Lado::Retiro)
+            } else {
+                n += 1;
+                (format!("TIRO {n}"), Lado::Tiro)
+            }
+        })
+        .collect()
+}
+
+/// Rótulo de la plancha: el nombre de cada tinta escrito en esa misma tinta
+/// (así cada plancha dice cuál es) y, en color de registro, el archivo y el
+/// lado: «CYAN / MAGENTA / AMARILLO / NEGRO  VOLANTES  TIRO 1».
+fn dibujar_rotulo(s: &mut String, r: &crate::imposicion::marcas::Rotulo, tintas: u8, titulo: &str, lado: &str) {
+    use crate::letras;
+    const REGISTRO: &str = "/Registro CS 1 SCN";
+    let tintas: &[(&str, &str)] = if tintas == 1 {
+        &[("NEGRO", "0 0 0 1 K")]
+    } else {
+        &[("CYAN", "1 0 0 0 K"), ("MAGENTA", "0 1 0 0 K"), ("AMARILLO", "0 0 1 0 K"), ("NEGRO", "0 0 0 1 K")]
+    };
+    let mut partes: Vec<(String, &str)> = Vec::new();
+    for (i, (nombre, color)) in tintas.iter().enumerate() {
+        if i > 0 {
+            partes.push((" / ".into(), REGISTRO));
+        }
+        partes.push(((*nombre).into(), color));
+    }
+    let fijo = letras::largo(&partes.iter().map(|(t, _)| t.as_str()).collect::<String>(), r.alto);
+    let cola = format!("   {}   {lado}", titulo.trim());
+    let cola = letras::ajustar(&cola, r.alto, (r.largo - fijo).max(0.0));
+    partes.push((cola, REGISTRO));
+
+    let u = mm_a_pt(r.alto / 6.0);
+    let (x, y) = (mm_a_pt(r.x), mm_a_pt(r.y));
+    let matriz = if r.vertical { format!("0 {} {} 0", n(u), n(-u)) } else { format!("{} 0 0 {}", n(u), n(u)) };
+    // Trazo de 0,6 pt, en unidades de letra.
+    s.push_str(&format!("q {matriz} {} {} cm {} w 1 J 1 j\n", n(x), n(y), n(0.6 / u)));
+    let mut avance = 0.0;
+    for (texto, color) in partes {
+        let (segmentos, ancho) = letras::segmentos(&texto);
+        if !segmentos.is_empty() {
+            s.push_str(color);
+            s.push('\n');
+            for seg in segmentos {
+                for (i, (a, b)) in seg.iter().enumerate() {
+                    s.push_str(&format!("{} {} {} ", n(a + avance), n(*b), if i == 0 { "m" } else { "l" }));
+                }
+                s.push_str("S\n");
+            }
+        }
+        avance += ancho;
+    }
+    s.push_str("Q\n");
+}
+
+/// Marcas de la cara. A una tinta, la tira de control lleva solo negro (cada
+/// parche con el tono de gris que le corresponde).
+fn dibujar_marcas(m: &Marcas, s: &mut String, tintas: u8) {
     if !m.tira_color.is_empty() {
         s.push_str("q\n");
         for p in &m.tira_color {
+            let mut p = *p;
+            if tintas == 1 {
+                let [c, mg, y, k] = p.cmyk;
+                let gris = 0.30 * (1.0 - c) * (1.0 - k) + 0.59 * (1.0 - mg) * (1.0 - k) + 0.11 * (1.0 - y) * (1.0 - k);
+                p.cmyk = [0.0, 0.0, 0.0, 1.0 - gris];
+            }
             s.push_str(&format!(
                 "{} {} {} {} k {} {} {} {} re f\n",
                 n(p.cmyk[0]),
@@ -1483,6 +1597,26 @@ fn xmp(titulo: &str, fecha: &Fecha, pdfx: Option<&str>, id: &str) -> String {
 #[cfg(test)]
 mod pruebas {
     use super::*;
+
+    #[test]
+    fn tiros_y_retiros() {
+        let cara = |nombre: &str| Cara {
+            nombre: nombre.into(),
+            pliego: Tamano::new(100.0, 100.0),
+            ubicaciones: vec![],
+            marcas: Marcas::default(),
+            cajas: None,
+        };
+        let caras = [
+            cara("Firma 1 tiro"),
+            cara("Firma 1 retiro"),
+            cara("Firma 2 tiro"),
+            cara("Firma 2 retiro"),
+            cara("Firma 3 · tira y retira"),
+        ];
+        let lados: Vec<String> = lados_de(&caras).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(lados, ["TIRO 1", "RETIRO 1", "TIRO 2", "RETIRO 2", "TIRA Y RETIRA 3"]);
+    }
 
     #[test]
     fn rebase_por_lados() {

@@ -74,9 +74,27 @@ pub struct Marcas {
     /// Marcas de alzado en el lomo de cada firma.
     #[serde(default)]
     pub alzado: Vec<Rect>,
+    /// Dónde va el rótulo de la plancha (tintas, archivo, tiro o retiro).
+    #[serde(default)]
+    pub rotulo: Option<Rotulo>,
     /// Lo que no se pudo dibujar por falta de espacio.
     pub avisos: Vec<String>,
 }
+
+/// Lugar del rótulo: el texto empieza en (x, y) con letras de `alto` mm y
+/// cabe en `largo` mm. Vertical: se lee de abajo hacia arriba (girado 90°)
+/// y las letras quedan a la izquierda de x.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Rotulo {
+    pub x: f64,
+    pub y: f64,
+    pub alto: f64,
+    pub largo: f64,
+    pub vertical: bool,
+}
+
+/// Alto de las letras del rótulo (mm).
+pub const ALTO_ROTULO: f64 = 2.5;
 
 /// Secuencia de la tira: sólidos, sobreimpresiones, tramas al 50 % y gris.
 const PARCHES: [[f64; 4]; 12] = [
@@ -170,7 +188,47 @@ pub fn generar(cortes: &[Rect], pliego: Tamano, area: &Rect, rebase: f64, op: &O
             m.avisos.push("sin espacio en la cola para la tira de color".into());
         }
     }
+
+    if op.corte {
+        m.rotulo = lugar_rotulo(&b, pliego, area, &m, op.espacio_necesario(rebase));
+        if m.rotulo.is_none() {
+            m.avisos.push("sin espacio para el rótulo de la plancha".into());
+        }
+    }
     m
+}
+
+/// Primer lugar libre para el rótulo: en la cola sobre la tira de color, a la
+/// izquierda o a la derecha del bloque (vertical) o entre la pinza y el bloque.
+fn lugar_rotulo(b: &Rect, pliego: Tamano, area: &Rect, m: &Marcas, espacio: f64) -> Option<Rotulo> {
+    let h = ALTO_ROTULO;
+    let x0 = area.x.max(0.0) + 1.0;
+    let x1 = area.derecha().min(pliego.ancho) - 1.0;
+    let y0 = area.y.max(0.0) + 1.0;
+    let y1 = area.arriba().min(pliego.alto) - 1.0;
+    let minimo = 40.0;
+    // En la cola: sobre la tira de color o sobre las marcas.
+    let sobre = m.tira_color.iter().map(|p| p.rect.arriba()).fold(b.arriba() + espacio, f64::max) + 1.0;
+    if sobre + h <= y1 && x1 - b.x.max(x0) >= minimo {
+        let x = b.x.max(x0);
+        return Some(Rotulo { x, y: sobre, alto: h, largo: x1 - x, vertical: false });
+    }
+    // A los lados, leyendo de abajo hacia arriba.
+    let izquierda = b.x - espacio - 1.0;
+    if izquierda - h >= x0 && b.alto >= minimo {
+        return Some(Rotulo { x: izquierda, y: b.y, alto: h, largo: b.alto, vertical: true });
+    }
+    let derecha = b.derecha() + espacio + 1.0 + h;
+    if derecha <= x1 && b.alto >= minimo {
+        return Some(Rotulo { x: derecha, y: b.y, alto: h, largo: b.alto, vertical: true });
+    }
+    // Entre la pinza y el bloque.
+    let abajo = b.y - espacio - 1.0 - h;
+    if abajo >= y0 && x1 - b.x.max(x0) >= minimo {
+        let x = b.x.max(x0);
+        return Some(Rotulo { x, y: abajo, alto: h, largo: x1 - x, vertical: false });
+    }
+    None
 }
 
 #[cfg(test)]

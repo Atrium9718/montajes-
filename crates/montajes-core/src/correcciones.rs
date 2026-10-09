@@ -51,6 +51,16 @@ pub struct Correcciones {
     /// sobre las demás opciones de rebase en las páginas que tienen fondo.
     #[serde(default)]
     pub rebase_extendido: bool,
+    /// Tintas del tiro y del retiro: 4 (CMYK) o 1 (todo se pasa a negro,
+    /// ver [`crate::gris`]). Salen en el rótulo de cada plancha.
+    #[serde(default = "cuatro")]
+    pub tintas_tiro: u8,
+    #[serde(default = "cuatro")]
+    pub tintas_retiro: u8,
+}
+
+fn cuatro() -> u8 {
+    4
 }
 
 /// Rebase de un borde.
@@ -79,6 +89,8 @@ impl Correcciones {
             fondos: Vec::new(),
             modos: Vec::new(),
             rebase_extendido: false,
+            tintas_tiro: 4,
+            tintas_retiro: 4,
         }
     }
 
@@ -94,6 +106,8 @@ impl Correcciones {
             fondos: Vec::new(),
             modos: Vec::new(),
             rebase_extendido: false,
+            tintas_tiro: 4,
+            tintas_retiro: 4,
         }
     }
 

@@ -488,6 +488,12 @@ struct ArgsCorreccion {
     /// fondo siguen más allá del corte, sin textos ni logos).
     #[arg(long)]
     rebase_extendido: bool,
+    /// Tintas del tiro: 4 (CMYK) o 1 (todo en negro).
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=4))]
+    tintas: u8,
+    /// Tintas del retiro (por defecto, las del tiro).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=4))]
+    tintas_retiro: Option<u8>,
 }
 
 impl ArgsCorreccion {
@@ -501,6 +507,8 @@ impl ArgsCorreccion {
             c.rebase_estirado = true;
         }
         c.rebase_extendido = self.rebase_extendido;
+        c.tintas_tiro = self.tintas;
+        c.tintas_retiro = self.tintas_retiro.unwrap_or(self.tintas);
         c
     }
 }
