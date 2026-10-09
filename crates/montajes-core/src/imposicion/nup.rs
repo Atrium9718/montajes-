@@ -322,6 +322,54 @@ pub(crate) fn bloque(cortes: &[Rect]) -> Rect {
     Rect::new(x0, y0, x1 - x0, y1 - y0)
 }
 
+/// Marcas de pliegue de un plegable (díptico, tríptico, cuadríptico) en cada
+/// cara: `pliegues` son las distancias (mm) de cada pliegue al borde izquierdo
+/// del exterior visto de frente, `ancho` el ancho abierto de la pieza. Las
+/// páginas con `espejo(pagina)` (el interior, al dorso) llevan los pliegues
+/// reflejados. Se marcan fuera del bloque, como las de corte, y punteadas.
+pub fn marcar_pliegues(
+    cara: &mut Cara,
+    pliegues: &[f64],
+    ancho: f64,
+    espejo: impl Fn(usize) -> bool,
+    rebase: f64,
+    op: &OpcionesMarcas,
+) {
+    if pliegues.is_empty() || cara.ubicaciones.is_empty() || !op.corte {
+        return;
+    }
+    let cortes: Vec<Rect> = cara.ubicaciones.iter().map(|u| u.corte).collect();
+    let b = bloque(&cortes);
+    let d = op.distancia(rebase);
+    let (mut xs, mut ys) = (Vec::new(), Vec::new());
+    for u in &cara.ubicaciones {
+        let c = u.corte;
+        for &p in pliegues {
+            let p = if espejo(u.pagina) { ancho - p } else { p };
+            match u.giro % 360 {
+                0 => xs.push(c.x + p * c.ancho / ancho),
+                180 => xs.push(c.derecha() - p * c.ancho / ancho),
+                90 => ys.push(c.arriba() - p * c.alto / ancho),
+                _ => ys.push(c.y + p * c.alto / ancho),
+            }
+        }
+    }
+    let unicos = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+        v
+    };
+    use super::marcas::Linea;
+    for x in unicos(xs) {
+        cara.marcas.pliegues.push(Linea { x1: x, y1: b.arriba() + d, x2: x, y2: b.arriba() + d + op.largo });
+        cara.marcas.pliegues.push(Linea { x1: x, y1: b.y - d - op.largo, x2: x, y2: b.y - d });
+    }
+    for y in unicos(ys) {
+        cara.marcas.pliegues.push(Linea { x1: b.x - d - op.largo, y1: y, x2: b.x - d, y2: y });
+        cara.marcas.pliegues.push(Linea { x1: b.derecha() + d, y1: y, x2: b.derecha() + d + op.largo, y2: y });
+    }
+}
+
 #[cfg(test)]
 mod pruebas {
     use super::*;
@@ -455,53 +503,5 @@ mod pruebas {
         let mut p = tarjetas(0.0, Orientacion::Auto);
         p.pieza = Tamano::new(500.0, 400.0);
         assert!(matches!(calcular(&p), Err(Error::NoCabe(_))));
-    }
-}
-
-/// Marcas de pliegue de un plegable (díptico, tríptico, cuadríptico) en cada
-/// cara: `pliegues` son las distancias (mm) de cada pliegue al borde izquierdo
-/// del exterior visto de frente, `ancho` el ancho abierto de la pieza. Las
-/// páginas con `espejo(pagina)` (el interior, al dorso) llevan los pliegues
-/// reflejados. Se marcan fuera del bloque, como las de corte, y punteadas.
-pub fn marcar_pliegues(
-    cara: &mut Cara,
-    pliegues: &[f64],
-    ancho: f64,
-    espejo: impl Fn(usize) -> bool,
-    rebase: f64,
-    op: &OpcionesMarcas,
-) {
-    if pliegues.is_empty() || cara.ubicaciones.is_empty() || !op.corte {
-        return;
-    }
-    let cortes: Vec<Rect> = cara.ubicaciones.iter().map(|u| u.corte).collect();
-    let b = bloque(&cortes);
-    let d = op.distancia(rebase);
-    let (mut xs, mut ys) = (Vec::new(), Vec::new());
-    for u in &cara.ubicaciones {
-        let c = u.corte;
-        for &p in pliegues {
-            let p = if espejo(u.pagina) { ancho - p } else { p };
-            match u.giro % 360 {
-                0 => xs.push(c.x + p * c.ancho / ancho),
-                180 => xs.push(c.derecha() - p * c.ancho / ancho),
-                90 => ys.push(c.arriba() - p * c.alto / ancho),
-                _ => ys.push(c.y + p * c.alto / ancho),
-            }
-        }
-    }
-    let unicos = |mut v: Vec<f64>| {
-        v.sort_by(f64::total_cmp);
-        v.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
-        v
-    };
-    use super::marcas::Linea;
-    for x in unicos(xs) {
-        cara.marcas.pliegues.push(Linea { x1: x, y1: b.arriba() + d, x2: x, y2: b.arriba() + d + op.largo });
-        cara.marcas.pliegues.push(Linea { x1: x, y1: b.y - d - op.largo, x2: x, y2: b.y - d });
-    }
-    for y in unicos(ys) {
-        cara.marcas.pliegues.push(Linea { x1: b.x - d - op.largo, y1: y, x2: b.x - d, y2: y });
-        cara.marcas.pliegues.push(Linea { x1: b.derecha() + d, y1: y, x2: b.derecha() + d + op.largo, y2: y });
     }
 }
