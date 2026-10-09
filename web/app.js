@@ -348,7 +348,12 @@ function selectorMaquina(id) {
   return `<label class="campo"><span>Máquina</span>
     <select id="${id}">${estado.maquinas.map((m) => `<option value="${esc(m.id)}" ${m.id === elegida ? "selected" : ""}>${esc(m.nombre)} · ${mm(m.pliego_max.ancho, 0)}×${mm(m.pliego_max.alto, 0)}</option>`).join("")}</select></label>`;
 }
-const maquinaElegida = (id) => estado.maquinas.find((m) => m.id === ($(`#${id}`)?.value ?? estado.preferencias.maquina)) || estado.maquinas[0];
+/** Máquina elegida, con la pinza que se haya puesto para este trabajo (vale solo para esa máquina). */
+function maquinaElegida(id) {
+  const m = estado.maquinas.find((x) => x.id === ($(`#${id}`)?.value ?? estado.preferencias.maquina)) || estado.maquinas[0];
+  const o = id === "pz-maquina" ? estado.piezas.op : id === "lb-maquina" ? estado.libro.op : null;
+  return m && o?.pinza != null && o.pinzaDe === m.id ? { ...m, pinza: o.pinza } : m;
+}
 
 function zonaArchivo(id, texto) {
   return `<label class="soltar" id="${id}-zona">
@@ -788,6 +793,9 @@ function svgCara(cara, maquina, opciones = {}) {
   if (maquina && !cara.cajas && guias) {
     const a = { x: maquina.lateral, y: maquina.pinza, ancho: W - 2 * maquina.lateral, alto: H - maquina.pinza - maquina.cola };
     partes.push(r(a, `fill="none" stroke="var(--gris)" stroke-width="${W / 700}" stroke-dasharray="${W / 120} ${W / 160}"`));
+  }
+  // La pinza se marca siempre (no se imprime): así se ve de qué lado entra el papel.
+  if (maquina && !cara.cajas && maquina.pinza > 0) {
     partes.push(`<rect x="0" y="${H - maquina.pinza}" width="${W}" height="${maquina.pinza}" fill="var(--naranja)" opacity=".12"/>`);
     partes.push(`<text x="${W / 2}" y="${H - maquina.pinza / 2}" font-size="${Math.max(Math.min(maquina.pinza * 0.7, W / 45), 3)}" text-anchor="middle" dominant-baseline="middle" fill="var(--naranja)" font-weight="700" letter-spacing=".1em">PINZA</text>`);
   }
@@ -875,7 +883,13 @@ function svgCara(cara, maquina, opciones = {}) {
     partes.push(r(p.rect, `fill="rgb(${rgb})"`));
   }
   for (const a of m.alzado || []) partes.push(r(a, `fill="${tinta}"`));
-  return `<svg viewBox="${-W * 0.01} ${-H * 0.01} ${W * 1.02} ${H * 1.02}" role="img" aria-label="${esc(cara.nombre)}: pliego de ${mm(W, 0)} por ${mm(H, 0)} mm">${partes.join("")}</svg>`;
+  const etiqueta = `${esc(cara.nombre)}: pliego de ${mm(W, 0)} por ${mm(H, 0)} mm`;
+  // El pliego se ve siempre horizontal (como se acostumbra en el taller): si va
+  // vertical en la máquina, se gira 90° y la pinza queda a la izquierda.
+  if (H > W) {
+    return `<svg viewBox="${-H * 0.01} ${-W * 0.01} ${H * 1.02} ${W * 1.02}" role="img" aria-label="${etiqueta}, pinza en el lado corto"><g transform="matrix(0 1 -1 0 ${H} 0)">${partes.join("")}</g></svg>`;
+  }
+  return `<svg viewBox="${-W * 0.01} ${-H * 0.01} ${W * 1.02} ${H * 1.02}" role="img" aria-label="${etiqueta}">${partes.join("")}</svg>`;
 }
 
 function tarjetaVistaPrevia(trabajo, maquina, titulo, insignias = false) {
@@ -971,9 +985,26 @@ function selectorPapel(prefijo, o, maquina, papel) {
       <label class="campo"><span>Alto (mm)</span><input type="number" id="${prefijo}-pliego-alto" value="${o.pliegoAlto ?? ""}"></label>
       <button class="boton boton-claro boton-chico" type="button" id="${prefijo}-guardar-tam" style="align-self:end">Guardar tamaño</button></div>` : ""}
     <small>Solo aparecen los tamaños que caben en ${esc(maquina.nombre)}. Abajo se comparan para ver cuál gasta menos papel.</small>
-    ${ambasOrientaciones(pliegoDe(o, maquina) || maquina.pliego_max, maquina) ? `<div class="campo"><span>Papel en la máquina</span>${chips(`${prefijo}-orientacion-papel`, [["auto", "Automático (lo que más rinda)"], ["horizontal", "Horizontal"], ["vertical", "Vertical"]], o.orientacionPapel || "auto")}</div>` : ""}</div>`;
+    ${bloquePinza(prefijo, o, maquina)}</div>`;
 }
 /** ¿El papel entra en la máquina tanto horizontal como vertical? */
+/**
+ * Pinza: de qué lado del papel muerde (lado largo = papel horizontal en la
+ * máquina; lado corto = vertical) y cuánto mide en este trabajo.
+ */
+function bloquePinza(prefijo, o, maquina) {
+  const papel = pliegoDe(o, maquina) || maquina.pliego_max;
+  const ambas = ambasOrientaciones(papel, maquina);
+  const unica = comoPapel(cabeEnMaquina({ ancho: Math.max(papel.ancho, papel.alto), alto: Math.min(papel.ancho, papel.alto) }, maquina) ? { ancho: 2, alto: 1 } : { ancho: 1, alto: 2 });
+  const propia = maquina.pinza;
+  const original = estado.maquinas.find((m) => m.id === maquina.id)?.pinza ?? propia;
+  return `<div class="campo"><span>Pinza</span>
+      ${ambas ? chips(`${prefijo}-orientacion-papel`, [["auto", "Automático (lo que más rinda)"], ["horizontal", "Horizontal · lado largo"], ["vertical", "Vertical · lado corto"]], o.orientacionPapel || "auto")
+        : `<small>En ${esc(maquina.nombre)} este papel solo entra con la pinza en el lado ${unica === "horizontal" ? "largo (horizontal)" : "corto (vertical)"}.</small>`}
+    </div>
+    <label class="campo"><span>Tamaño de la pinza (mm)</span><input type="number" min="0" max="60" step="0.5" id="${prefijo}-pinza" value="${propia}">
+      <small>${Math.abs(propia - original) > 0.01 ? `Cambiada para este trabajo; la de la máquina es ${mm(original)} mm.` : "La de la máquina; cámbiala si este trabajo necesita otra."}</small></label>`;
+}
 const ambasOrientaciones = (t, m) => cabeEnMaquina({ ancho: t.ancho, alto: t.alto }, m) && cabeEnMaquina({ ancho: t.alto, alto: t.ancho }, m);
 const orientacionPapel = (o) => o.orientacionPapel || "auto";
 /** «horizontal» o «vertical» según cómo quedó el pliego. */
@@ -988,6 +1019,13 @@ function conectarSelectorPapel(prefijo, o, alCambiar) {
     alCambiar(false);
   }));
   $(`#${prefijo}-papel-tam`)?.addEventListener("change", (e) => { e.stopPropagation(); o.papelTam = e.target.value; alCambiar(true); });
+  $(`#${prefijo}-pinza`)?.addEventListener("change", (e) => {
+    e.stopPropagation();
+    const v = num(e.target.value, -1);
+    o.pinza = e.target.value === "" || v < 0 ? null : v;
+    o.pinzaDe = $(`#${prefijo}-maquina`)?.value ?? estado.preferencias.maquina;
+    alCambiar(true);
+  });
   for (const lado of ["ancho", "alto"]) {
     $(`#${prefijo}-pliego-${lado}`)?.addEventListener("change", (e) => {
       e.stopPropagation();
@@ -1206,7 +1244,7 @@ function vistaPiezas(main) {
   conectarSelectorPapel("pz", o, (redibujar) => (redibujar ? vistaPiezas(main) : calcularPiezas()));
   conectarEscala("pz", o, () => vistaPiezas(main));
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file" || el.dataset.correccion || el.dataset.cantidad || /papel-tam|pliego-(ancho|alto)|-escala/.test(el.id)) return;
+    if (el.type === "file" || el.dataset.correccion || el.dataset.cantidad || /papel-tam|pliego-(ancho|alto)|-escala|-pinza$/.test(el.id)) return;
     const antes = { dorso: o.dorso, rebase: o.rebase, maquina: estado.preferencias.maquina };
     leerOpciones();
     if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaPiezas(main); return; }
@@ -1822,7 +1860,7 @@ function vistaLibro(main) {
   conectarSelectorPapel("lb", o, (redibujar) => { t.cara = 0; if (redibujar) vistaLibro(main); else calcularLibro(); });
   conectarEscala("lb", o, () => { t.cara = 0; vistaLibro(main); });
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file" || el.dataset.correccion || el.dataset.rol || /papel-tam|pliego-(ancho|alto)|-escala/.test(el.id)) return;
+    if (el.type === "file" || el.dataset.correccion || el.dataset.rol || /papel-tam|pliego-(ancho|alto)|-escala|-pinza$/.test(el.id)) return;
     const antes = { rebase: o.rebase, maquina: estado.preferencias.maquina };
     o.cuadernillos = $("#lb-cuadernillos").value.trim();
     $("#lb-cuadernillos").nextElementSibling.textContent = textoCuadernillos(t);
