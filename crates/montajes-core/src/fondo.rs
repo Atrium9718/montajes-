@@ -18,6 +18,19 @@ const PROFUNDIDAD_MAXIMA: usize = 12;
 pub const MARGEN_FONDO: f64 = 42.52;
 /// Un relleno con más subtrazados que esto es un dibujo (letras, logos), no un fondo.
 const SUBTRAZOS_MAXIMOS: usize = 8;
+/// Operaciones que se revisan como mucho por página: un PDF con símbolos o
+/// patrones anidados miles de veces no debe agotar la memoria del navegador.
+const PRESUPUESTO_OPERACIONES: usize = 3_000_000;
+
+/// Estado compartido mientras se filtra una página.
+#[derive(Default)]
+struct Contexto {
+    /// Forma ya filtrada por (objeto, parte lineal de la CTM en milésimas):
+    /// una forma repetida al mismo tamaño se filtra una sola vez.
+    hechas: std::collections::HashMap<(ObjectId, [i64; 4]), Option<ObjectId>>,
+    operaciones: usize,
+    agotado: bool,
+}
 
 /// Medidas del corte de la página, para decidir qué es «grande».
 struct Referencia {
@@ -93,7 +106,12 @@ pub fn forma_fondo(doc: &mut Document, p: &PaginaFuente) -> Option<ObjectId> {
     let c = &p.corte;
     let r = Referencia { area: c.ancho() * c.alto(), ancho: c.ancho(), alto: c.alto() };
     let identidad = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-    let (contenido, nuevos) = filtrar(doc, &datos, recursos.as_ref(), identidad, &r, 0)?;
+    let mut ctx = Contexto::default();
+    let resultado = filtrar(doc, &datos, recursos.as_ref(), identidad, &r, 0, &mut ctx);
+    if ctx.agotado {
+        return None;
+    }
+    let (contenido, nuevos) = resultado?;
     let recursos = nuevos.or(recursos).unwrap_or_default();
     let Caja { x0, y0, x1, y1 } = p.media;
     let mut dict = dictionary! {
@@ -117,6 +135,59 @@ pub fn forma_fondo(doc: &mut Document, p: &PaginaFuente) -> Option<ObjectId> {
     Some(doc.add_object(Stream::new(dict, contenido)))
 }
 
+/// Copia filtrada de un Form XObject usado con la CTM `ctm` (o `None` si no
+/// queda nada de fondo).
+fn filtrar_forma(
+    doc: &mut Document,
+    objeto: &Object,
+    recursos: Option<&Dictionary>,
+    ctm: [f64; 6],
+    r: &Referencia,
+    profundidad: usize,
+    ctx: &mut Contexto,
+) -> Option<ObjectId> {
+    let s = resolver(doc, objeto).as_stream().ok()?;
+    let datos = s.decompressed_content().unwrap_or_else(|_| s.content.clone());
+    let mut dict = s.dict.clone();
+    let propios = dict.get(b"Resources").ok().and_then(|o| resolver(doc, o).as_dict().ok().cloned());
+    let recursos_forma = propios.clone().or_else(|| recursos.cloned());
+    let m = multiplicar(&matriz(dict.get(b"Matrix").ok(), doc), &ctm);
+    let (nuevo, nuevos_recursos) = filtrar(doc, &datos, recursos_forma.as_ref(), m, r, profundidad + 1, ctx)?;
+    dict.remove(b"Filter");
+    dict.remove(b"DecodeParms");
+    dict.remove(b"Length");
+    if let Some(nr) = nuevos_recursos.or(propios.or_else(|| recursos.cloned())) {
+        dict.set("Resources", nr);
+    }
+    // La BBox de una forma del tamaño de la página es el recorte de la mesa
+    // de trabajo: se abre para que el fondo siga más allá.
+    let caja_forma = dict
+        .get(b"BBox")
+        .ok()
+        .and_then(|o| resolver(doc, o).as_array().ok())
+        .map(|a| numeros(a))
+        .filter(|v| v.len() == 4);
+    if let Some(bb) = caja_forma {
+        let mut lim = Limites::VACIO;
+        for (x, y) in [(bb[0], bb[1]), (bb[2], bb[1]), (bb[0], bb[3]), (bb[2], bb[3])] {
+            lim.sumar(&m, x, y);
+        }
+        if lim.pagina_entera(r) {
+            let a = (bb[2] - bb[0]).abs().max((bb[3] - bb[1]).abs());
+            dict.set(
+                "BBox",
+                vec![
+                    Object::Real((bb[0].min(bb[2]) - a) as f32),
+                    Object::Real((bb[1].min(bb[3]) - a) as f32),
+                    Object::Real((bb[0].max(bb[2]) + a) as f32),
+                    Object::Real((bb[1].max(bb[3]) + a) as f32),
+                ],
+            );
+        }
+    }
+    Some(doc.add_object(Stream::new(dict, nuevo)))
+}
+
 /// Filtra un flujo de contenido. Devuelve el contenido nuevo y, si cambió
 /// algún Form XObject anidado, los recursos con esos reemplazos.
 fn filtrar(
@@ -126,11 +197,17 @@ fn filtrar(
     ctm: [f64; 6],
     r: &Referencia,
     profundidad: usize,
+    ctx: &mut Contexto,
 ) -> Option<(Vec<u8>, Option<Dictionary>)> {
-    if profundidad > PROFUNDIDAD_MAXIMA {
+    if profundidad > PROFUNDIDAD_MAXIMA || ctx.agotado {
         return None;
     }
     let contenido = Content::decode(datos).ok()?;
+    ctx.operaciones += contenido.operations.len();
+    if ctx.operaciones > PRESUPUESTO_OPERACIONES {
+        ctx.agotado = true;
+        return None;
+    }
     let xobjetos: Option<Dictionary> =
         recursos.and_then(|d| d.get(b"XObject").ok()).and_then(|x| resolver(doc, x).as_dict().ok().cloned());
 
@@ -247,8 +324,8 @@ fn filtrar(
                     continue;
                 };
                 let Some(objeto) = xobjetos.as_ref().and_then(|x| x.get(&clave).ok()).cloned() else { continue };
-                let Object::Stream(s) = resolver(doc, &objeto).clone() else { continue };
-                match s.dict.get(b"Subtype").ok().and_then(|o| o.as_name().ok()) {
+                let Ok(flujo) = resolver(doc, &objeto).as_stream() else { continue };
+                match flujo.dict.get(b"Subtype").ok().and_then(|o| o.as_name().ok()) {
                     Some(b"Image") => {
                         let mut b = Limites::VACIO;
                         for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
@@ -260,53 +337,26 @@ fn filtrar(
                         }
                     }
                     Some(b"Form") => {
-                        let datos = s.decompressed_content().unwrap_or_else(|_| s.content.clone());
-                        let propios =
-                            s.dict.get(b"Resources").ok().and_then(|o| resolver(doc, o).as_dict().ok().cloned());
-                        let recursos_forma = propios.clone().or_else(|| recursos.cloned());
-                        let m = multiplicar(&matriz(s.dict.get(b"Matrix").ok(), doc), &ctm);
-                        let Some((nuevo, nuevos_recursos)) =
-                            filtrar(doc, &datos, recursos_forma.as_ref(), m, r, profundidad + 1)
-                        else {
-                            continue;
+                        let lineal = [ctm[0], ctm[1], ctm[2], ctm[3]].map(|v| (v * 1000.0).round() as i64);
+                        let llave = objeto.as_reference().ok().map(|id| (id, lineal));
+                        let nueva = match llave.and_then(|k| ctx.hechas.get(&k).copied()) {
+                            Some(hecha) => hecha,
+                            None => {
+                                let hecha = filtrar_forma(doc, &objeto, recursos, ctm, r, profundidad, ctx);
+                                if let Some(k) = llave {
+                                    ctx.hechas.insert(k, hecha);
+                                }
+                                hecha
+                            }
                         };
-                        let mut dict = s.dict.clone();
-                        dict.remove(b"Filter");
-                        dict.remove(b"DecodeParms");
-                        dict.remove(b"Length");
-                        if let Some(nr) = nuevos_recursos.or(propios.or_else(|| recursos.cloned())) {
-                            dict.set("Resources", nr);
+                        let Some(id) = nueva else { continue };
+                        // Nombre propio por versión filtrada (la misma forma puede
+                        // quedar distinta a otro tamaño).
+                        let nombre = format!("Fondo{}_{}", id.0, id.1).into_bytes();
+                        if !reemplazos.iter().any(|(n, _)| *n == nombre) {
+                            reemplazos.push((nombre.clone(), id));
                         }
-                        // La BBox de una forma del tamaño de la página es el recorte de la
-                        // mesa de trabajo: se abre para que el fondo siga más allá.
-                        let caja_forma = dict
-                            .get(b"BBox")
-                            .ok()
-                            .and_then(|o| resolver(doc, o).as_array().ok())
-                            .map(|a| numeros(a))
-                            .filter(|v| v.len() == 4);
-                        if let Some(bb) = caja_forma {
-                            let mut lim = Limites::VACIO;
-                            for (x, y) in [(bb[0], bb[1]), (bb[2], bb[1]), (bb[0], bb[3]), (bb[2], bb[3])] {
-                                lim.sumar(&m, x, y);
-                            }
-                            if lim.pagina_entera(r) {
-                                let (sx, sy) = ((bb[2] - bb[0]).abs(), (bb[3] - bb[1]).abs());
-                                let (ax, ay) = (sx.max(sy), sx.max(sy));
-                                dict.set(
-                                    "BBox",
-                                    vec![
-                                        Object::Real((bb[0].min(bb[2]) - ax) as f32),
-                                        Object::Real((bb[1].min(bb[3]) - ay) as f32),
-                                        Object::Real((bb[0].max(bb[2]) + ax) as f32),
-                                        Object::Real((bb[1].max(bb[3]) + ay) as f32),
-                                    ],
-                                );
-                            }
-                        }
-                        let nuevo_id = doc.add_object(Stream::new(dict, nuevo));
-                        reemplazos.push((clave, nuevo_id));
-                        salida.push(op);
+                        salida.push(Operation::new("Do", vec![Object::Name(nombre)]));
                         pinta = true;
                     }
                     _ => {}

@@ -177,6 +177,10 @@ struct Revisor<'a> {
     peor_lineart: f64,
     peor_cobertura: f64,
     peor_linea: f64,
+    /// Formas ya revisadas por (objeto, parte lineal de la CTM, página): lo que
+    /// se revisa depende del tamaño, no de la posición, así una forma repetida
+    /// miles de veces (símbolos, patrones) se revisa una vez.
+    vistas: std::collections::HashSet<(lopdf::ObjectId, [i64; 4], usize)>,
 }
 
 impl<'a> Revisor<'a> {
@@ -540,6 +544,13 @@ impl<'a> Revisor<'a> {
                     match s.dict.get(b"Subtype").ok().and_then(Self::nombre).as_deref() {
                         Some("Image") => self.revisar_imagen(&s.dict, &estado.ctm, pagina),
                         Some("Form") => {
+                            let lineal = [estado.ctm[0], estado.ctm[1], estado.ctm[2], estado.ctm[3]]
+                                .map(|v| (v * 1000.0).round() as i64);
+                            if let Ok(id) = obj.as_reference()
+                                && !self.vistas.insert((id, lineal, pagina))
+                            {
+                                continue;
+                            }
                             if s.dict.get(b"Group").ok().and_then(|g| self.dict(g)).is_some_and(|g| {
                                 g.get(b"S").ok().and_then(Self::nombre).as_deref() == Some("Transparency")
                             }) {
@@ -572,6 +583,7 @@ pub fn revisar(fuente: &Fuente, op: &OpcionesPreflight) -> InformePreflight {
         peor_lineart: f64::INFINITY,
         peor_cobertura: 0.0,
         peor_linea: f64::INFINITY,
+        vistas: Default::default(),
     };
     let ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
     for (i, (p, id)) in fuente.paginas.iter().zip(ids).enumerate() {

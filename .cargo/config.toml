@@ -1,0 +1,4 @@
+# Pila de 8 MB para el motor en el navegador (la de serie es 1 MB): los PDF
+# con contenido muy anidado no deben desbordarla.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-args=-z stack-size=8388608"]

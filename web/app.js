@@ -399,7 +399,7 @@ function analizarArchivo(trabajo, archivo, formatosMixtos = false) {
     revisarArchivo(trabajo);
   } catch (e) {
     trabajo.info = null;
-    trabajo.error = `No se pudo leer el PDF: ${e.message || e}`;
+    trabajo.error = `No se pudo leer el PDF: ${mensaje(e)}`;
   }
 }
 
@@ -411,7 +411,7 @@ function revisarArchivo(trabajo, maquina) {
   try {
     trabajo.preflight = JSON.parse(motor.revisar_pdf(trabajo.archivo.bytes, JSON.stringify({ rebase: trabajo.op.rebase, pdfx: m?.salida?.pdfx || "PDF/X-4" })));
   } catch (e) {
-    trabajo.preflight = { hallazgos: [], errores: 0, advertencias: 0, falla: String(e.message || e) };
+    trabajo.preflight = { hallazgos: [], errores: 0, advertencias: 0, falla: mensaje(e) };
   }
 }
 
@@ -432,6 +432,15 @@ function bloquePreflight(trabajo) {
     <div class="revision-cabeza"><b>Revisión del PDF</b>${resumen}</div>
     ${items ? `<details ${p.errores ? "open" : ""}><summary>${p.hallazgos.length} ${p.hallazgos.length === 1 ? "punto" : "puntos"} revisados</summary><ul class="revision-lista">${items}</ul></details>` : ""}
   </div>`;
+}
+
+/** Texto de un error para mostrar. Si el motor (WebAssembly) se detuvo, queda
+ * inservible hasta recargar: se dice así en vez del mensaje técnico. */
+function mensaje(e) {
+  if (e instanceof WebAssembly.RuntimeError || /memory access out of bounds|unreachable/i.test(String(e?.message))) {
+    return "el motor se quedó sin memoria con este PDF. Recarga la página y vuelve a intentarlo; si se repite, envíanos el archivo.";
+  }
+  return String(e?.message || e);
 }
 
 function chips(nombre, opciones, valor) {
@@ -1236,7 +1245,7 @@ function agregarArchivosCombinado(t, nuevos) {
     const bytes = t.archivos.length === 1 ? t.archivos[0].bytes : motor.unir_pdfs(t.archivos.map((a) => a.bytes));
     analizarArchivo(t, { nombre: t.archivos.length === 1 ? t.archivos[0].nombre : `combinado-${t.archivos.length}-archivos.pdf`, bytes });
   } catch (e) {
-    t.error = `No se pudieron juntar los PDF: ${e.message || e}`;
+    t.error = `No se pudieron juntar los PDF: ${mensaje(e)}`;
   }
 }
 
@@ -1291,7 +1300,7 @@ function calcularPiezas() {
       t.plan = JSON.parse(motor.planear_combinado(JSON.stringify(peticionCombinado(maquina, t.info))));
       const disenos = disenosCombinado(t);
       explicacion = disenos.map((x, i) => `${esc(x.etiqueta)}: <span class="resaltado">${t.plan.plan.posiciones[i]} posiciones</span> → ${t.plan.plan.impresos[i].toLocaleString("es-CO")} (sobran ${(t.plan.plan.impresos[i] - x.cantidad).toLocaleString("es-CO")})`).join("<br>");
-    } catch (e) { errorPlan = String(e.message || e); }
+    } catch (e) { errorPlan = mensaje(e); }
   } else if (t.info?.formato && maquina && !t.error) {
     try {
       t.plan = JSON.parse(motor.planear_nup(JSON.stringify(peticionPiezas(maquina, t.info))));
@@ -1306,7 +1315,7 @@ function calcularPiezas() {
       }
       if (t.plan?.pliego) explicacion += ` Papel ${comoPapel(t.plan.pliego)} de ${cm(t.plan.pliego.ancho)} × ${cm(t.plan.pliego.alto)} cm.`;
       if (escalaDe(t.op) !== 1 && t.info?.formato) explicacion += ` Arte al <span class="resaltado">${Math.round(escalaDe(t.op) * 100)} %</span>: queda de ${cm(t.info.formato.ancho * escalaDe(t.op))} × ${cm(t.info.formato.alto * escalaDe(t.op))} cm.`;
-    } catch (e) { errorPlan = String(e.message || e); }
+    } catch (e) { errorPlan = mensaje(e); }
   }
   const d = t.plan?.distribucion;
   const metricas = combinado && t.plan
@@ -1352,7 +1361,7 @@ function calcularPiezas() {
       const inf = JSON.parse(r.informe);
       const corregidos = inf.avisos.filter((a) => a.startsWith("corregido")).length;
       avisar(`${inf.pdfx ? "PDF listo (con perfil de salida)" : "PDF listo"}${corregidos ? ` · ${corregidos} correcciones aplicadas` : ""}`);
-    } catch (err) { avisar(`Error: ${err.message || err}`); }
+    } catch (err) { avisar(`Error: ${mensaje(err)}`); }
     b.disabled = false; b.textContent = "Descargar PDF listo para imprimir";
   });
 }
@@ -1462,7 +1471,7 @@ function conectarPaginasLibro(main, t) {
       analizarArchivo(t, { nombre: `${base(t.archivo.nombre)}-paginas.pdf`, tamano: bytes.length, bytes }, true);
       t.roles = t.info ? rolesIniciales(t.info) : [];
       avisar(`Listo: ${t.info?.paginas.length} páginas sencillas`);
-    } catch (err) { avisar(`${err.message || err}`); }
+    } catch (err) { avisar(`${mensaje(err)}`); }
     redibujar();
   });
   $$("[data-rol]", main).forEach((sel) => sel.addEventListener("change", (e) => {
@@ -1528,7 +1537,7 @@ function pintarCaratula() {
   const maquina = maquinaElegida("lb-maquina");
   let calculo = null, error = "";
   try { calculo = JSON.parse(motor.calcular_portada_json(JSON.stringify(peticionCaratula(maquina, false)))); }
-  catch (e) { error = String(e.message || e); }
+  catch (e) { error = mensaje(e); }
   const tiro = asignadas.filter(([r]) => !["segunda", "tercera", "interior", "solapa_portada_interior", "solapa_contraportada_interior"].includes(r));
   const retiro = asignadas.filter(([r]) => !tiro.some(([x]) => x === r));
   const opcionesPapel = estado.papeles.map((p) => `<option value="${esc(p.id)}" ${p.id === o.papelCaratula ? "selected" : ""}>${esc(p.nombre)} · ${p.calibre_um} µm</option>`).join("");
@@ -1565,7 +1574,7 @@ function pintarCaratula() {
       const inf = JSON.parse(r.informe);
       descargar(r.pdf, `${base(t.archivo.nombre)}-caratula${montar ? "-pliego" : ""}.pdf`);
       avisar(inf.por_pliego ? `Carátula lista: ${inf.por_pliego} por pliego${inf.con_retiro ? ", con tiro y retiro" : ""}` : `Carátula lista${inf.con_retiro ? " (tiro y retiro)" : ""}`);
-    } catch (err) { avisar(`${err.message || err}`); }
+    } catch (err) { avisar(`${mensaje(err)}`); }
     boton.disabled = false; boton.textContent = texto;
   };
   $("#car-montada", caja)?.addEventListener("click", (e) => descargarCaratula(true, e.currentTarget));
@@ -1612,7 +1621,7 @@ function pintarGuardas() {
       descargar(r.pdf, `${base(t.archivo.nombre)}-guardas${montar ? "-pliego" : ""}.pdf`);
       avisar(inf.por_pliego ? `Guardas listas: ${inf.por_pliego} por pliego` : `${inf.guardas === 1 ? "Guarda lista" : "Guardas listas"}`);
       if (inf.avisos?.length) console.info(inf.avisos);
-    } catch (err) { avisar(`${err.message || err}`); }
+    } catch (err) { avisar(`${mensaje(err)}`); }
     boton.disabled = false; boton.textContent = texto;
   };
   $("#gu-montada", caja)?.addEventListener("click", (e) => descargarGuardas(true, e.currentTarget));
@@ -1682,7 +1691,7 @@ function pintarCotizacion(tipo) {
       papel: papel ? { nombre: papel.nombre, precio_pliego_compra: papel.precio || 0, salen_por_pliego: motor.salen_de(compra.ancho, compra.alto, pliego.ancho, pliego.alto) } : null,
       acabados: c.acabados.filter((a) => a.concepto && a.valor > 0),
     })));
-  } catch (e) { error = String(e.message || e); }
+  } catch (e) { error = mensaje(e); }
   const sinCostos = !costos.costo_plancha && !costos.costo_millar && !costos.costo_clic && !costos.costo_arranque;
   caja.innerHTML = `<section class="tarjeta cotizacion">
     <div class="paso-titulo"><span class="orbe cotizacion-orbe" aria-hidden="true"></span><div><h3>Cotización</h3><p class="tenue" style="font-size:14px">Papel con mácula, planchas, impresión y acabados de ${esc(maquina.nombre)}.</p></div></div>
@@ -1865,7 +1874,7 @@ function calcularLibro() {
   t.plan = null;
   if (t.info && tripaDe(t).length && maquina && !t.error) {
     try { t.plan = JSON.parse(motor.planear_libro(JSON.stringify(peticionLibro(maquina, t.info)))); }
-    catch (e) { t.plan = null; caja.dataset.error = String(e.message || e); }
+    catch (e) { t.plan = null; caja.dataset.error = mensaje(e); }
   }
   const error = t.error || (!t.plan && caja.dataset.error) || "";
   delete caja.dataset.error;
@@ -1951,7 +1960,7 @@ function calcularLibro() {
       descargar(r.pdf, `${base(t.archivo.nombre)}-pliegos.pdf`);
       const corregidos = JSON.parse(r.informe).avisos.filter((a) => a.startsWith("corregido")).length;
       avisar(`Pliegos listos${corregidos ? ` · ${corregidos} correcciones aplicadas` : ""}`);
-    } catch (err) { avisar(`Error: ${err.message || err}`); }
+    } catch (err) { avisar(`Error: ${mensaje(err)}`); }
     b.disabled = false; b.textContent = "Descargar pliegos";
   });
 }
@@ -2060,7 +2069,7 @@ function calcularPortada() {
   if (!caja) return;
   let c = null, error = "";
   try { c = JSON.parse(motor.calcular_portada_json(JSON.stringify(peticionPortada()))); }
-  catch (e) { error = String(e.message || e); }
+  catch (e) { error = mensaje(e); }
   t.calculo = c;
   const paneles = c ? c.paneles.filter((p) => p.tipo !== "vuelta" || p.rect.alto >= c.tamano.alto - 0.001) : [];
   const html = `
@@ -2083,7 +2092,7 @@ function calcularPortada() {
   if (!pintar(caja, html)) return;
   $("#po-plantilla")?.addEventListener("click", () => {
     try { const r = motor.plantilla_portada(JSON.stringify(peticionPortada())); descargar(r.pdf, `plantilla-portada-${mm(c.lomo, 1).replace(",", "_")}mm.pdf`); avisar("Plantilla descargada"); }
-    catch (e) { avisar(`Error: ${e.message || e}`); }
+    catch (e) { avisar(`Error: ${mensaje(e)}`); }
   });
   $("#po-armar")?.addEventListener("change", async (e) => {
     const archivo = e.target.files[0];
@@ -2095,7 +2104,7 @@ function calcularPortada() {
       descargar(r.pdf, `${base(archivo.name)}-portada.pdf`);
       const inf = JSON.parse(r.informe);
       avisar(inf.completa ? "Portada verificada: la medida es correcta" : "Portada armada");
-    } catch (err) { avisar(`${err.message || err}`); }
+    } catch (err) { avisar(`${mensaje(err)}`); }
     e.target.value = "";
   });
 }
