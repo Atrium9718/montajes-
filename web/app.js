@@ -474,17 +474,48 @@ async function pedirMiniaturas(trabajo, indices, redibujar) {
       const base = pagina.getViewport({ scale: 1, rotation: 0 });
       const vp = pagina.getViewport({ scale: Math.min(2.5, 700 / Math.max(base.width, base.height)), rotation: 0 });
       const lienzo = Object.assign(document.createElement("canvas"), { width: Math.ceil(vp.width), height: Math.ceil(vp.height) });
-      const ctx = lienzo.getContext("2d");
+      const ctx = lienzo.getContext("2d", { willReadFrequently: true });
       ctx.fillStyle = "#fff";
       ctx.fillRect(0, 0, lienzo.width, lienzo.height);
       await pagina.render({ canvasContext: ctx, viewport: vp }).promise;
       trabajo.mini[i] = lienzo.toDataURL("image/jpeg", 0.82);
+      // El mismo dibujo da el color del fondo para el rebase de la vista previa.
+      trabajo.fondos ??= {};
+      if (!(i in trabajo.fondos)) try { trabajo.fondos[i] = fondosDeLienzo(ctx, lienzo.width, trabajo.info.paginas[i]); } catch { /* se mide al generar */ }
     }
   } catch (e) {
     console.warn("Miniaturas no disponibles:", e);
     for (const i of faltan) trabajo.mini[i] = false;
   }
   if (trabajo.archivo === archivo) redibujar();
+}
+
+/** Color del fondo junto a cada borde de corte, leído de la página ya dibujada. */
+function fondosDeLienzo(ctx, ancho, info) {
+  const [vx0, , , vy1] = info.vista;
+  const pxmm = ancho / (info.vista[2] - info.vista[0]);
+  const X = (xmm) => Math.round((xmm - vx0) * pxmm), Y = (ymm) => Math.round((vy1 - ymm) * pxmm);
+  const [cx0, cy0, cx1, cy1] = info.corte;
+  const a = 0.5, b = 2.5;
+  const franjas = [
+    [X(cx0 + a), Y(cy1), X(cx0 + b), Y(cy0)], // izquierda
+    [X(cx0), Y(cy0 + b), X(cx1), Y(cy0 + a)], // abajo
+    [X(cx1 - b), Y(cy1), X(cx1 - a), Y(cy0)], // derecha
+    [X(cx0), Y(cy1 - a), X(cx1), Y(cy1 - b)], // arriba
+  ];
+  return franjas.map(([x0, y0, x1, y1]) => {
+    const w = Math.max(1, x1 - x0), h = Math.max(1, y1 - y0);
+    const datos = ctx.getImageData(Math.max(0, x0), Math.max(0, y0), w, h).data;
+    const cubetas = new Map();
+    for (let k = 0; k < datos.length; k += 4) {
+      const clave = (datos[k] >> 4) * 256 + (datos[k + 1] >> 4) * 16 + (datos[k + 2] >> 4);
+      const c = cubetas.get(clave) || [0, 0, 0, 0];
+      c[0] += datos[k]; c[1] += datos[k + 1]; c[2] += datos[k + 2]; c[3]++;
+      cubetas.set(clave, c);
+    }
+    const [r, g, bb, n] = [...cubetas.values()].sort((p, q) => q[3] - p[3])[0] || [255, 255, 255, 1];
+    return [r / n / 255, g / n / 255, bb / n / 255];
+  });
 }
 
 /**
@@ -510,30 +541,7 @@ async function medirFondos(trabajo, indices) {
       ctx.fillStyle = "#fff";
       ctx.fillRect(0, 0, lienzo.width, lienzo.height);
       await pagina.render({ canvasContext: ctx, viewport: vp }).promise;
-      const [vx0, , , vy1] = info.vista;
-      const pxmm = lienzo.width / (info.vista[2] - info.vista[0]);
-      const X = (xmm) => Math.round((xmm - vx0) * pxmm), Y = (ymm) => Math.round((vy1 - ymm) * pxmm);
-      const [cx0, cy0, cx1, cy1] = info.corte;
-      const a = 0.5, b = 2.5;
-      const franjas = [
-        [X(cx0 + a), Y(cy1), X(cx0 + b), Y(cy0)], // izquierda
-        [X(cx0), Y(cy0 + b), X(cx1), Y(cy0 + a)], // abajo
-        [X(cx1 - b), Y(cy1), X(cx1 - a), Y(cy0)], // derecha
-        [X(cx0), Y(cy1 - a), X(cx1), Y(cy1 - b)], // arriba
-      ];
-      trabajo.fondos[i] = franjas.map(([x0, y0, x1, y1]) => {
-        const w = Math.max(1, x1 - x0), h = Math.max(1, y1 - y0);
-        const datos = ctx.getImageData(Math.max(0, x0), Math.max(0, y0), w, h).data;
-        const cubetas = new Map();
-        for (let k = 0; k < datos.length; k += 4) {
-          const clave = (datos[k] >> 4) * 256 + (datos[k + 1] >> 4) * 16 + (datos[k + 2] >> 4);
-          const c = cubetas.get(clave) || [0, 0, 0, 0];
-          c[0] += datos[k]; c[1] += datos[k + 1]; c[2] += datos[k + 2]; c[3]++;
-          cubetas.set(clave, c);
-        }
-        const [r, g, bb, n] = [...cubetas.values()].sort((p, q) => q[3] - p[3])[0] || [255, 255, 255, 1];
-        return [r / n / 255, g / n / 255, bb / n / 255];
-      });
+      trabajo.fondos[i] = fondosDeLienzo(ctx, lienzo.width, info);
     } catch (e) {
       // Sin color medido el motor estira la orilla: tampoco usa lo de fuera del corte.
       console.warn(`No se pudo medir el fondo de la página ${i + 1}:`, e);
@@ -578,14 +586,17 @@ function svgCara(cara, maquina, opciones = {}) {
   const y = (v, h = 0) => H - v - h; // PDF (abajo-izquierda) → SVG (arriba-izquierda)
   const r = (rc, extra = "") => `<rect x="${rc.x}" y="${y(rc.y, rc.alto)}" width="${rc.ancho}" height="${rc.alto}" ${extra}/>`;
   const partes = [];
-  partes.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="var(--superficie)" stroke="var(--linea)" stroke-width="${W / 400}"/>`);
-  if (maquina && !cara.cajas) {
+  // «Como queda el PDF»: papel blanco, marcas en negro y sin guías encima.
+  const guias = opciones.guias !== false;
+  const tinta = guias ? "var(--tinta)" : "#1d1d1f";
+  partes.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="${guias ? "var(--superficie)" : "#fff"}" stroke="var(--linea)" stroke-width="${W / 400}"/>`);
+  if (maquina && !cara.cajas && guias) {
     const a = { x: maquina.lateral, y: maquina.pinza, ancho: W - 2 * maquina.lateral, alto: H - maquina.pinza - maquina.cola };
     partes.push(r(a, `fill="none" stroke="var(--gris)" stroke-width="${W / 700}" stroke-dasharray="${W / 120} ${W / 160}"`));
     partes.push(`<rect x="0" y="${H - maquina.pinza}" width="${W}" height="${maquina.pinza}" fill="var(--naranja)" opacity=".12"/>`);
     partes.push(`<text x="${W / 2}" y="${H - maquina.pinza / 2}" font-size="${Math.max(Math.min(maquina.pinza * 0.7, W / 45), 3)}" text-anchor="middle" dominant-baseline="middle" fill="var(--naranja)" font-weight="700" letter-spacing=".1em">PINZA</text>`);
   }
-  if (cara.cajas) partes.push(r(cara.cajas.sangrado, `fill="none" stroke="#d93b2b" stroke-width="${W / 900}"`));
+  if (cara.cajas && guias) partes.push(r(cara.cajas.sangrado, `fill="none" stroke="#d93b2b" stroke-width="${W / 900}"`));
   const { info, mini } = opciones;
   cara.ubicaciones.forEach((u, k) => {
     const color = COLORES[u.pagina % COLORES.length];
@@ -600,8 +611,28 @@ function svgCara(cara, maquina, opciones = {}) {
       if (Math.abs(s - 1) > 1e-9) m = multiplicar(m, [s, 0, 0, s, u.corte.x * (1 - s), u.corte.y * (1 - s)]);
       const t = multiplicar(multiplicar([1, 0, 0, -1, vx0, vy1], m), [1, 0, 0, -1, 0, H]);
       const id = `rc-${opciones.clave || "c"}-${k}`;
-      partes.push(`<clipPath id="${id}">${r(u.recorte)}</clipPath><g clip-path="url(#${id})"><image href="${imagen}" x="0" y="0" width="${vx1 - vx0}" height="${vy1 - vy0}" preserveAspectRatio="none" transform="matrix(${t.map((v) => +v.toFixed(4)).join(" ")})"/></g>`);
-      partes.push(r(u.corte, `fill="none" stroke="var(--tinta)" stroke-width="${W / 1100}" stroke-opacity=".5"`));
+      // Igual que el motor: con «solo fondo» la página va recortada al corte y
+      // el rebase se rellena con el color medido junto a cada borde.
+      const colores = opciones.soloFondo ? opciones.fondos?.[u.pagina] : null;
+      const clip = opciones.soloFondo ? u.corte : u.recorte;
+      if (colores) {
+        const c = u.corte, rr = u.recorte;
+        const pasos = ((pag.giro + u.giro) % 360) / 90;
+        const ciclo = [0, 3, 2, 1]; // izquierda, arriba, derecha, abajo (horario)
+        const color = (lado) => colores[ciclo[(ciclo.indexOf(lado) + 4 - pasos) % 4]].map((v) => Math.round(v * 255));
+        const bandas = [
+          [0, { x: rr.x, y: rr.y, ancho: c.x - rr.x, alto: rr.alto }],
+          [2, { x: c.x + c.ancho, y: rr.y, ancho: rr.x + rr.ancho - c.x - c.ancho, alto: rr.alto }],
+          [1, { x: c.x, y: rr.y, ancho: c.ancho, alto: c.y - rr.y }],
+          [3, { x: c.x, y: c.y + c.alto, ancho: c.ancho, alto: rr.y + rr.alto - c.y - c.alto }],
+        ];
+        // Cada franja se mete 0,4 mm bajo la página y bajo la vecina para que el
+        // suavizado del navegador no deje filos claros entre ellas.
+        const e = 0.4;
+        for (const [lado, z] of bandas) if (z.ancho > 0.01 && z.alto > 0.01) partes.push(r({ x: z.x - e, y: z.y - e, ancho: z.ancho + 2 * e, alto: z.alto + 2 * e }, `fill="rgb(${color(lado)})"`));
+      }
+      partes.push(`<clipPath id="${id}">${r(clip)}</clipPath><g clip-path="url(#${id})"><image href="${imagen}" x="0" y="0" width="${vx1 - vx0}" height="${vy1 - vy0}" preserveAspectRatio="none" transform="matrix(${t.map((v) => +v.toFixed(4)).join(" ")})"/></g>`);
+      if (guias) partes.push(r(u.corte, `fill="none" stroke="var(--tinta)" stroke-width="${W / 1100}" stroke-opacity=".5"`));
       if (opciones.numeros !== false && opciones.insignias) {
         const tam = Math.min(u.corte.ancho, u.corte.alto) * 0.16;
         const cx = u.corte.x + tam * 0.8, cy = y(u.corte.y + u.corte.alto) + tam * 0.8;
@@ -621,15 +652,15 @@ function svgCara(cara, maquina, opciones = {}) {
   });
   const m = cara.marcas;
   const trazo = W / 1000;
-  for (const l of m.corte) partes.push(`<line x1="${l.x1}" y1="${y(l.y1)}" x2="${l.x2}" y2="${y(l.y2)}" stroke="var(--tinta)" stroke-width="${trazo * 1.2}"/>`);
+  for (const l of m.corte) partes.push(`<line x1="${l.x1}" y1="${y(l.y1)}" x2="${l.x2}" y2="${y(l.y2)}" stroke="${tinta}" stroke-width="${trazo * 1.2}"/>`);
   for (const l of m.pliegues || []) partes.push(`<line x1="${l.x1}" y1="${y(l.y1)}" x2="${l.x2}" y2="${y(l.y2)}" stroke="#c03ac0" stroke-width="${trazo * 1.5}" stroke-dasharray="${W / 300}"/>`);
-  for (const g of m.registro) partes.push(`<g stroke="var(--tinta)" stroke-width="${trazo}" fill="none"><circle cx="${g.x}" cy="${y(g.y)}" r="${g.radio * 0.6}"/><line x1="${g.x - g.radio}" y1="${y(g.y)}" x2="${g.x + g.radio}" y2="${y(g.y)}"/><line x1="${g.x}" y1="${y(g.y) - g.radio}" x2="${g.x}" y2="${y(g.y) + g.radio}"/></g>`);
+  for (const g of m.registro) partes.push(`<g stroke="${tinta}" stroke-width="${trazo}" fill="none"><circle cx="${g.x}" cy="${y(g.y)}" r="${g.radio * 0.6}"/><line x1="${g.x - g.radio}" y1="${y(g.y)}" x2="${g.x + g.radio}" y2="${y(g.y)}"/><line x1="${g.x}" y1="${y(g.y) - g.radio}" x2="${g.x}" y2="${y(g.y) + g.radio}"/></g>`);
   for (const p of m.tira_color) {
     const [c, mg, a, k] = p.cmyk;
     const rgb = [(1 - c) * (1 - k), (1 - mg) * (1 - k), (1 - a) * (1 - k)].map((v) => Math.round(v * 255));
     partes.push(r(p.rect, `fill="rgb(${rgb})"`));
   }
-  for (const a of m.alzado || []) partes.push(r(a, `fill="var(--tinta)"`));
+  for (const a of m.alzado || []) partes.push(r(a, `fill="${tinta}"`));
   return `<svg viewBox="${-W * 0.01} ${-H * 0.01} ${W * 1.02} ${H * 1.02}" role="img" aria-label="${esc(cara.nombre)}: pliego de ${mm(W, 0)} por ${mm(H, 0)} mm">${partes.join("")}</svg>`;
 }
 
@@ -640,6 +671,7 @@ function tarjetaVistaPrevia(trabajo, maquina, titulo, insignias = false) {
   }
   const i = Math.min(trabajo.cara, caras.length - 1);
   const muchas = caras.length > 14;
+  const guias = estado.preferencias.vistaGuias === true;
   return `<section class="tarjeta vista-previa">
     <div class="vista-previa-cabeza">
       <h3>${esc(caras[i].nombre)} <span class="tenue num">· ${i + 1} de ${caras.length}</span></h3>
@@ -649,13 +681,21 @@ function tarjetaVistaPrevia(trabajo, maquina, titulo, insignias = false) {
         <button class="boton boton-claro boton-chico" data-cara="${i + 1}" ${i === caras.length - 1 ? "disabled" : ""} aria-label="Pliego siguiente">→</button>
       </div>
     </div>
-    <div class="lienzo">${svgCara(caras[i], maquina, { info: trabajo.info, mini: trabajo.mini, insignias, clave: i })}</div>
-    <div class="leyenda"><span><i style="border-color:var(--tinta)"></i>Corte</span><span><i style="border-color:#c03ac0;border-top-style:dashed"></i>Pliegue</span><span><i style="border-color:var(--gris);border-top-style:dashed"></i>Área imprimible</span><span><i style="border-color:var(--naranja)"></i>Pinza</span></div>
+    <div class="lienzo">${svgCara(caras[i], maquina, { info: trabajo.info, mini: trabajo.mini, insignias: insignias && guias, clave: i, guias, soloFondo: correcciones().rebase_fondo, fondos: trabajo.fondos })}</div>
+    <div class="leyenda">${chips("vista-guias", [["pdf", "Como queda el PDF"], ["guias", "Con guías"]], guias ? "guias" : "pdf")}
+      ${guias ? `<span><i style="border-color:var(--tinta)"></i>Corte</span><span><i style="border-color:#c03ac0;border-top-style:dashed"></i>Pliegue</span><span><i style="border-color:var(--gris);border-top-style:dashed"></i>Área imprimible</span><span><i style="border-color:var(--naranja)"></i>Pinza</span>` : ""}</div>
   </section>`;
 }
 
 function conectarPaginador(raiz, trabajo, redibujar) {
   $$("[data-cara]", raiz).forEach((b) => b.addEventListener("click", () => { trabajo.cara = Number(b.dataset.cara); redibujar(); }));
+  $$('[data-chips="vista-guias"]', raiz).forEach((g) => g.addEventListener("click", (e) => {
+    const b = e.target.closest(".chip");
+    if (!b) return;
+    e.stopPropagation(); // no es una opción del montaje
+    preferir("vistaGuias", b.dataset.valor === "guias");
+    redibujar();
+  }));
 }
 
 // ───────────── Tamaños de papel (pliego de impresión) ─────────────
