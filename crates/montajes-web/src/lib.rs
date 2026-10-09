@@ -243,6 +243,13 @@ pub fn separar_dobles(pdf: &[u8], paginas: &str) -> R<Vec<u8>> {
     pdf::separar_dobles(pdf, &lista).map_err(error)
 }
 
+/// Une un plegable que viene por cuerpos (una página por cuerpo) en piezas abiertas.
+#[wasm_bindgen]
+pub fn unir_cuerpos(pdf: &[u8], cuerpos: usize) -> R<Vec<u8>> {
+    licencia::exigir()?;
+    pdf::unir_cuerpos(pdf, cuerpos).map_err(error)
+}
+
 /// Marca TrimBox y BleedBox en el interior que sale de la diagramación
 /// (páginas compuestas con el rebase dentro de la MediaBox).
 #[wasm_bindgen]
@@ -329,6 +336,10 @@ struct PeticionNup {
     fecha: u64,
     #[serde(default)]
     correcciones: Correcciones,
+    /// Plegable: distancia (mm) de cada pliegue al borde izquierdo del
+    /// exterior (la primera página de cada par), sin escalar.
+    #[serde(default)]
+    pliegues: Vec<f64>,
 }
 
 fn tres() -> f64 {
@@ -389,6 +400,18 @@ fn plan_nup(p: &PeticionNup) -> R<(ParametrosNup, Distribucion, Vec<Cara>)> {
     };
     let mut caras = nup::caras_trabajo(&parametros, &d, p.paginas, p.dorso.then_some(p.volteo));
     aplicar_escala(&mut caras, escala);
+    // Plegable: el interior (dorso, páginas pares en base 1) lleva los pliegues reflejados.
+    let pliegues: Vec<f64> = p.pliegues.iter().copied().filter(|x| *x > 0.0 && *x < p.formato.ancho).collect();
+    for cara in &mut caras {
+        nup::marcar_pliegues(
+            cara,
+            &pliegues,
+            p.formato.ancho,
+            |pag| p.dorso && pag % 2 == 1,
+            p.rebase,
+            &parametros.marcas,
+        );
+    }
     Ok((parametros, d, caras))
 }
 

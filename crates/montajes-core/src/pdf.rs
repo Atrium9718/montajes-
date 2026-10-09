@@ -262,6 +262,79 @@ pub fn fijar_cajas(bytes: &[u8], rebase_mm: f64) -> Resultado<Vec<u8>> {
     Ok(salida)
 }
 
+/// Une un plegable que viene por cuerpos (una página por cuerpo) en piezas
+/// abiertas: cada `cuerpos` páginas seguidas forman una pieza, de izquierda a
+/// derecha (primero el exterior, luego el interior). Los cuerpos se juntan
+/// por el corte; el rebase queda solo en los bordes de afuera.
+pub fn unir_cuerpos(bytes: &[u8], cuerpos: usize) -> Resultado<Vec<u8>> {
+    let Fuente { mut doc, paginas } = Fuente::desde_bytes(bytes)?;
+    if cuerpos < 2 || paginas.is_empty() || !paginas.len().is_multiple_of(cuerpos) {
+        return Err(Error::Invalido(format!(
+            "el PDF tiene {} páginas: para {cuerpos} cuerpos debe tener un múltiplo de {cuerpos} (exterior e interior)",
+            paginas.len()
+        )));
+    }
+    if let Some(i) = paginas.iter().position(|p| p.giro != 0) {
+        return Err(Error::Invalido(format!("la página {} está girada; no se puede unir por cuerpos", i + 1)));
+    }
+    let raiz = doc.catalog()?.get(b"Pages")?.as_reference()?;
+    let mut conteo = Conteo::default();
+    let mut pendientes = Vec::new();
+    let mut nuevas = Vec::new();
+    for grupo in paginas.chunks(cuerpos) {
+        let alto = grupo[0].corte.alto();
+        if grupo.iter().any(|p| (p.corte.alto() - alto).abs() > 1.0) {
+            return Err(Error::Invalido("los cuerpos de un plegable deben tener la misma altura".into()));
+        }
+        let r = grupo.iter().map(PaginaFuente::rebase_disponible).fold(f64::INFINITY, f64::min);
+        let r = mm_a_pt(r);
+        let ancho: f64 = grupo.iter().map(|p| p.corte.ancho()).sum();
+        let mut xobjetos = Dictionary::new();
+        let mut contenido = String::new();
+        let mut x = r;
+        for (i, p) in grupo.iter().enumerate() {
+            let forma = crear_forma(&mut doc, p, &Correcciones::ninguna(), &mut conteo, &mut pendientes)?;
+            let nombre = format!("C{}", i + 1);
+            xobjetos.set(nombre.as_bytes(), Object::Reference(forma));
+            let izq = if i == 0 { r } else { 0.0 };
+            let der = if i + 1 == grupo.len() { r } else { 0.0 };
+            let w = p.corte.ancho();
+            contenido += &format!(
+                "q {} 0 {} {} re W n 1 0 0 1 {} {} cm /{nombre} Do Q\n",
+                n(x - izq),
+                n(w + izq + der),
+                n(alto + 2.0 * r),
+                n(x - p.corte.x0),
+                n(r - p.corte.y0)
+            );
+            x += w;
+        }
+        let flujo = doc.add_object(Stream::new(Dictionary::new(), contenido.into_bytes()));
+        let caja = |v: [f64; 4]| -> Object { v.iter().map(|x| Object::Real(*x as f32)).collect::<Vec<_>>().into() };
+        let hoja = caja([0.0, 0.0, ancho + 2.0 * r, alto + 2.0 * r]);
+        let pagina = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => raiz,
+            "MediaBox" => hoja.clone(),
+            "CropBox" => hoja.clone(),
+            "BleedBox" => hoja,
+            "TrimBox" => caja([r, r, ancho + r, alto + r]),
+            "Rotate" => 0,
+            "Contents" => flujo,
+            "Resources" => dictionary! { "XObject" => xobjetos },
+        });
+        nuevas.push(Object::Reference(pagina));
+    }
+    let cantidad = nuevas.len() as i64;
+    let arbol = doc.get_dictionary_mut(raiz)?;
+    arbol.set("Kids", nuevas);
+    arbol.set("Count", cantidad);
+    doc.prune_objects();
+    let mut salida = Vec::new();
+    doc.save_to(&mut salida)?;
+    Ok(salida)
+}
+
 /// Separa las páginas dobles (pliegos de lectura: dos páginas seguidas en una
 /// hoja) en dos páginas sencillas, en orden: primero la izquierda. Las demás
 /// páginas quedan igual. El contenido no se toca: cada mitad es la misma

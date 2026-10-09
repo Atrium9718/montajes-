@@ -860,6 +860,20 @@ function svgCara(cara, maquina, opciones = {}) {
         imagenCon(m, u.recorte, "p");
       }
       if (guias) partes.push(r(u.corte, `fill="none" stroke="var(--tinta)" stroke-width="${W / 1100}" stroke-opacity=".5"`));
+      // Con guías: los pliegues del plegable sobre cada pieza (como nup::marcar_pliegues).
+      const pl = opciones.plegable;
+      if (guias && pl?.pliegues?.length) {
+        const c = u.corte;
+        for (const p0 of pl.pliegues) {
+          const p = pl.dorso && u.pagina % 2 === 1 ? pl.ancho - p0 : p0;
+          const g = u.giro % 360;
+          const [x1, y1, x2, y2] = g === 0 ? [c.x + p * c.ancho / pl.ancho, c.y, c.x + p * c.ancho / pl.ancho, c.y + c.alto]
+            : g === 180 ? [c.x + c.ancho - p * c.ancho / pl.ancho, c.y, c.x + c.ancho - p * c.ancho / pl.ancho, c.y + c.alto]
+            : g === 90 ? [c.x, c.y + c.alto - p * c.alto / pl.ancho, c.x + c.ancho, c.y + c.alto - p * c.alto / pl.ancho]
+            : [c.x, c.y + p * c.alto / pl.ancho, c.x + c.ancho, c.y + p * c.alto / pl.ancho];
+          partes.push(`<line x1="${x1}" y1="${y(y1)}" x2="${x2}" y2="${y(y2)}" stroke="#c03ac0" stroke-width="${W / 700}" stroke-dasharray="${W / 200} ${W / 300}"/>`);
+        }
+      }
       if (opciones.numeros !== false && opciones.insignias) {
         const tam = Math.min(u.corte.ancho, u.corte.alto) * 0.16;
         const cx = u.corte.x + tam * 0.8, cy = y(u.corte.y + u.corte.alto) + tam * 0.8;
@@ -926,7 +940,7 @@ function tarjetaVistaPrevia(trabajo, maquina, titulo, insignias = false) {
         <button class="boton boton-claro boton-chico" data-cara="${i + 1}" ${i === caras.length - 1 ? "disabled" : ""} aria-label="Pliego siguiente">→</button>
       </div>
     </div>
-    <div class="lienzo">${svgCara(caras[i], maquina, { info: trabajo.info, mini: trabajo.mini, insignias: insignias && guias, clave: i, guias, modos: (k) => modosPagina(trabajo, k), fondos: trabajo.fondos, extendido: modoRebase() === "extendido", miniFondo: trabajo.miniFondo, tintas: tintasDe(trabajo.op), titulo: base(trabajo.archivo?.nombre) || "", ladoCara: (c) => ladosDe(caras).get(c) })}</div>
+    <div class="lienzo">${svgCara(caras[i], maquina, { info: trabajo.info, mini: trabajo.mini, insignias: insignias && guias, clave: i, guias, modos: (k) => modosPagina(trabajo, k), fondos: trabajo.fondos, extendido: modoRebase() === "extendido", miniFondo: trabajo.miniFondo, tintas: tintasDe(trabajo.op), plegable: trabajo === estado.piezas && trabajo.op.modo === "repetir" && trabajo.info?.formato ? { ...plegableDe(trabajo.op, trabajo.info.formato), ancho: trabajo.info.formato.ancho, dorso: trabajo.op.dorso } : null, titulo: base(trabajo.archivo?.nombre) || "", ladoCara: (c) => ladosDe(caras).get(c) })}</div>
     <div class="leyenda">${chips("vista-guias", [["pdf", "Como queda el PDF"], ["guias", "Con guías"]], guias ? "guias" : "pdf")}
       ${guias ? `<span><i style="border-color:var(--tinta)"></i>Corte</span><span><i style="border-color:#c03ac0;border-top-style:dashed"></i>Pliegue</span><span><i style="border-color:var(--gris);border-top-style:dashed"></i>Área imprimible</span><span><i style="border-color:var(--naranja)"></i>Pinza</span>` : ""}</div>
   </section>`;
@@ -1248,6 +1262,7 @@ function vistaPiezas(main) {
           <div class="campo"><span>Corte entre piezas</span>${chips("corte", [["doble", "Doble corte (calle con rebase)"], ["sencillo", "Corte sencillo (compartido)"]], o.calle > 0 ? "doble" : "sencillo")}
             <small>Doble corte: entre pieza y pieza queda una calle de ${mm(2 * o.rebase)} mm con el rebase de cada una; si la cuchilla se corre, no se ve la pieza vecina.</small></div>
           <div class="campo"><span>Orientación</span>${chips("orientacion", [["auto", "Automática"], ["normal", "Normal"], ["girada", "Girada 90°"]], o.orientacion)}</div>
+          ${o.modo === "repetir" ? bloquePlegable(t) : ""}
           ${campoEscala("pz", o, t.info?.formato)}
           ${selectorPapel("pz", o, maquinaElegida("pz-maquina"), null)}
           ${interruptor("pz-dorso", "Frente y dorso (páginas en pares)", o.dorso)}
@@ -1274,7 +1289,14 @@ function vistaPiezas(main) {
       calcularPiezas();
     }));
   } else {
-    conectarArchivo("pz-archivo", (a) => { analizarArchivo(t, a); vistaPiezas(main); });
+    conectarArchivo("pz-archivo", (a) => { analizarArchivo(t, a); aplicarPlegable(t); if (Number(o.cuerpos) && t.info?.paginas.length === 2) o.dorso = true; vistaPiezas(main); });
+    for (const id of ["pz-compensacion", "pz-anchos"]) {
+      $(`#${id}`)?.addEventListener("change", (e) => {
+        e.stopPropagation();
+        if (id === "pz-anchos") o.anchos = e.target.value.trim(); else o.compensacion = num(e.target.value, 2);
+        vistaPiezas(main);
+      });
+    }
   }
   $("#pz-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaPiezas(main); });
   const leerOpciones = () => {
@@ -1289,7 +1311,7 @@ function vistaPiezas(main) {
   conectarSelectorPapel("pz", o, (redibujar) => (redibujar ? vistaPiezas(main) : calcularPiezas()));
   conectarEscala("pz", o, () => vistaPiezas(main));
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file" || el.dataset.correccion || el.dataset.cantidad || /papel-tam|pliego-(ancho|alto)|-escala|-pinza$/.test(el.id)) return;
+    if (el.type === "file" || el.dataset.correccion || el.dataset.cantidad || /papel-tam|pliego-(ancho|alto)|-escala|-pinza$|pz-compensacion|pz-anchos/.test(el.id)) return;
     const antes = { dorso: o.dorso, rebase: o.rebase, maquina: estado.preferencias.maquina };
     leerOpciones();
     if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaPiezas(main); return; }
@@ -1297,6 +1319,15 @@ function vistaPiezas(main) {
   }));
   conectarChips(main, (n, v) => {
     if (n === "corte") { o.calle = v === "doble" ? 2 * o.rebase : 0; vistaPiezas(main); return; }
+    if (n === "cuerpos" || n === "plegado" || n === "archivoPlegable") {
+      o[n] = v;
+      if (n === "cuerpos") o.anchos = "";
+      aplicarPlegable(t);
+      // Un plegable abierto lleva exterior e interior: frente y dorso.
+      if (Number(o.cuerpos) && t.info?.paginas.length % 2 === 0) o.dorso = true;
+      vistaPiezas(main);
+      return;
+    }
     o[n] = v;
     if (n === "modo") {
       // Cada modo trabaja con sus propios archivos.
@@ -1362,7 +1393,81 @@ function peticionPiezas(maquina, info, orientacion) {
     rebase: o.rebase, calle: o.calle, orientacion: orientacion || o.orientacion,
     dorso: o.dorso, volteo: o.volteo, marcas: o.marcas, tira_color: o.tira,
     titulo: base(estado.piezas.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
+    pliegues: o.modo === "repetir" ? plegableDe(o, info.formato)?.pliegues || [] : [],
   };
+}
+
+// ───────────── Plegables (2, 3 o 4 cuerpos) ─────────────
+const PLEGADOS = {
+  2: [["diptico", "Díptico (un pliegue al centro)"]],
+  3: [["envolvente", "Envolvente (carta)"], ["acordeon", "Acordeón (Z)"], ["ventana", "Ventana"]],
+  4: [["acordeon", "Acordeón (zigzag)"], ["envolvente", "Envolvente"], ["ventana", "Ventana doble (puerta)"]],
+};
+/**
+ * Anchos de cada cuerpo del exterior, de izquierda a derecha, para un ancho
+ * abierto W. En el envolvente y la ventana los cuerpos que se meten adentro
+ * van más angostos (compensación c) para que el plegable cierre sin abombarse.
+ */
+function anchosCuerpos(n, tipo, W, c) {
+  if (tipo === "envolvente" && n > 2) {
+    // [w − (n−2)c, …, w − c, w, w]: el más angosto es la solapa que entra primero.
+    const w = (W + (c * (n - 2) * (n - 1)) / 2) / n;
+    return Array.from({ length: n }, (_, i) => (i < n - 2 ? w - (n - 2 - i) * c : w));
+  }
+  if (tipo === "ventana" && n === 3) {
+    const b = (W + 2 * c) / 2;
+    return [b / 2 - c, b, b / 2 - c];
+  }
+  if (tipo === "ventana" && n === 4) {
+    const b = (W + 2 * c) / 4;
+    return [b - c, b, b, b - c];
+  }
+  return Array(n).fill(W / n);
+}
+/** Plegable de un trabajo: cuerpos, anchos, pliegues (mm desde el borde izquierdo del exterior) y tamaño cerrado. */
+function plegableDe(o, formato) {
+  const n = Number(o.cuerpos) || 0;
+  if (!n || !formato) return null;
+  const tipo = PLEGADOS[n].some(([v]) => v === o.plegado) ? o.plegado : PLEGADOS[n][0][0];
+  const W = formato.ancho;
+  const c = num(o.compensacion, 2);
+  let anchos = anchosCuerpos(n, tipo, W, c);
+  let propios = false;
+  const escritos = String(o.anchos || "").split(/[;|\s]+/).map((v) => num(v, NaN)).filter((v) => v > 0);
+  if (escritos.length === n && Math.abs(escritos.reduce((a, b) => a + b, 0) - W) <= 1) { anchos = escritos; propios = true; }
+  const pliegues = anchos.slice(0, -1).map((_, i) => anchos.slice(0, i + 1).reduce((a, b) => a + b, 0));
+  return { n, tipo, anchos, pliegues, propios, escritosMal: escritos.length > 0 && !propios, cerrado: { ancho: Math.max(...anchos), alto: formato.alto } };
+}
+function bloquePlegable(t) {
+  const o = t.op;
+  const n = Number(o.cuerpos) || 0;
+  const pl = plegableDe(o, t.info?.formato);
+  const r = (v) => mm(v, 1);
+  return `<div class="campo"><span>Plegable</span>${chips("cuerpos", [["0", "No"], ["2", "2 cuerpos"], ["3", "3 cuerpos"], ["4", "4 cuerpos"]], String(n))}</div>
+    ${n ? `<div class="campo"><span>Tipo de plegado</span>${chips("plegado", PLEGADOS[n], pl?.tipo || PLEGADOS[n][0][0])}</div>
+    <div class="campo"><span>El PDF viene</span>${chips("archivoPlegable", [["abierto", "Abierto (exterior e interior)"], ["cuerpos", "Una página por cuerpo"]], o.archivoPlegable || "abierto")}
+      <small>${(o.archivoPlegable || "abierto") === "cuerpos" ? `Páginas en orden físico: los ${n} cuerpos del exterior de izquierda a derecha y luego los ${n} del interior de izquierda a derecha. Se unen en una pieza abierta.` : "Página 1 el exterior abierto y página 2 el interior (frente y dorso)."}</small></div>
+    <div class="fila">
+      ${pl && pl.tipo !== "acordeon" && pl.tipo !== "diptico" ? `<label class="campo"><span>Compensación (mm)</span><input type="number" step="0.5" min="0" max="6" id="pz-compensacion" value="${num(o.compensacion, 2)}"><small>Lo que es más angosto el cuerpo que se mete adentro.</small></label>` : ""}
+      <label class="campo"><span>Cuerpos del exterior (mm)</span><input type="text" id="pz-anchos" placeholder="Automático" value="${esc(o.anchos || "")}"><small>De izquierda a derecha, separados por espacios; vacío = automático.</small></label>
+    </div>
+    ${pl ? `<p class="nota">${pl.escritosMal ? `<b>Los anchos escritos no suman ${r(t.info.formato.ancho)} mm:</b> se usan los automáticos. ` : ""}Exterior: ${pl.anchos.map(r).join(" | ")} mm (el interior va al revés). Abierto ${r(t.info.formato.ancho)} × ${r(t.info.formato.alto)} mm · cerrado ${r(pl.cerrado.ancho)} × ${r(pl.cerrado.alto)} mm. Los pliegues se marcan punteados fuera del bloque.</p>` : t.info ? "" : `<p class="nota">Sube el PDF para ver los cuerpos.</p>`}` : ""}`;
+}
+/** Une los cuerpos si el PDF viene por cuerpos (o vuelve al original). */
+function aplicarPlegable(t) {
+  const o = t.op;
+  if (!t.archivo) return;
+  const n = Number(o.cuerpos) || 0;
+  const original = t.archivo.original || t.archivo.bytes;
+  const quiere = n && o.archivoPlegable === "cuerpos" ? n : 0;
+  if ((t.archivo.unido || 0) === quiere) return;
+  if (!quiere) { analizarArchivo(t, { nombre: t.archivo.nombre, tamano: t.archivo.tamano, bytes: original }); return; }
+  try {
+    const bytes = motor.unir_cuerpos(original, n);
+    analizarArchivo(t, { nombre: t.archivo.nombre, tamano: t.archivo.tamano, bytes, original, unido: n });
+  } catch (e) {
+    t.error = `No se pudieron unir los cuerpos: ${mensaje(e)}`;
+  }
 }
 
 function peticionCombinado(maquina, info) {

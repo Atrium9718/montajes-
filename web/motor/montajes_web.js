@@ -518,6 +518,24 @@ export function separar_dobles(pdf, paginas) {
 }
 
 /**
+ * Une un plegable que viene por cuerpos (una página por cuerpo) en piezas abiertas.
+ * @param {Uint8Array} pdf
+ * @param {number} cuerpos
+ * @returns {Uint8Array}
+ */
+export function unir_cuerpos(pdf, cuerpos) {
+    const ptr0 = passArray8ToWasm0(pdf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.unir_cuerpos(ptr0, len0, cuerpos);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * Junta varios PDF en uno (en orden) y devuelve sus bytes.
  * @param {Array<any>} archivos
  * @returns {Uint8Array}
