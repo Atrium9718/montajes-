@@ -7,6 +7,7 @@ pub mod firmas;
 pub mod marcas;
 pub mod nup;
 pub mod plegado;
+pub mod verificar;
 
 use serde::{Deserialize, Serialize};
 

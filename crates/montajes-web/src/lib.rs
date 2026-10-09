@@ -749,6 +749,13 @@ struct InformeLibro<'a> {
     lomo: Option<f64>,
     avisos: Vec<String>,
     pdfx: bool,
+    /// Resultado de doblar los pliegos (imposicion::verificar): vacío si cada
+    /// firma queda en orden y al derecho; si no, qué falla.
+    compaginacion: String,
+}
+
+fn compaginacion(par: &ParametrosLibro, plan: &PlanLibro) -> String {
+    montajes_core::imposicion::verificar::verificar(par, plan).err().unwrap_or_default()
 }
 
 fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)> {
@@ -811,7 +818,9 @@ pub fn planear_libro(peticion: &str) -> R<String> {
     let (par, plan, lomo) = plan_libro(&p)?;
     let mut avisos = plan.avisos.clone();
     avisos.extend(plan.caras.iter().flat_map(|c| c.marcas.avisos.clone()));
-    serde_json::to_string(&InformeLibro { plan: &plan, pliego: par.pliego, lomo, avisos, pdfx: false }).map_err(error)
+    let compaginacion = compaginacion(&par, &plan);
+    serde_json::to_string(&InformeLibro { plan: &plan, pliego: par.pliego, lomo, avisos, pdfx: false, compaginacion })
+        .map_err(error)
 }
 
 #[wasm_bindgen]
@@ -828,8 +837,10 @@ pub fn generar_libro(pdf: &[u8], peticion: &str, icc: &[u8]) -> R<Resultado> {
     let s = &p.maquina.salida;
     let (bytes, mas, pdfx) = escribir(fuente, &plan.caras, &salida(s, icc, &p.titulo, p.fecha, &p.correcciones))?;
     avisos.extend(mas);
+    let compaginacion = compaginacion(&par, &plan);
     let informe =
-        serde_json::to_string(&InformeLibro { plan: &plan, pliego: par.pliego, lomo, avisos, pdfx }).map_err(error)?;
+        serde_json::to_string(&InformeLibro { plan: &plan, pliego: par.pliego, lomo, avisos, pdfx, compaginacion })
+            .map_err(error)?;
     Ok(Resultado { pdf: bytes, informe })
 }
 

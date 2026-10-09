@@ -1618,17 +1618,26 @@ const ROLES_GUARDA = ["guarda_del", "guarda_tras"];
 const ROLES_CARATULA = ROLES.map(([r]) => r).filter((r) => r !== "tripa" && r !== "excluir" && !ROLES_GUARDA.includes(r));
 const NOMBRE_ROL = Object.fromEntries(ROLES);
 
-/** Propuesta inicial: las páginas de otro tamaño (pliegos extendidos) son la carátula. */
+/**
+ * Propuesta inicial: solo las páginas claramente más grandes que la tripa
+ * (la carátula extendida con lomo y solapas) son la carátula. Las que difieren
+ * en unos milímetros (PDF exportados con medidas desparejas) siguen en la tripa:
+ * sacarlas descompaginaría el libro.
+ */
 function rolesIniciales(info) {
-  const clave = (p) => `${Math.round(p.ancho)}x${Math.round(p.alto)}`;
-  const cuenta = {};
-  for (const p of info.paginas) cuenta[clave(p)] = (cuenta[clave(p)] || 0) + 1;
-  const comun = Object.entries(cuenta).sort((a, b) => b[1] - a[1])[0]?.[0];
-  const distintas = info.paginas.map((p, i) => [i, clave(p)]).filter(([, k]) => k !== comun).map(([i]) => i);
+  const cuenta = new Map();
+  for (const p of info.paginas) {
+    const k = `${Math.round(p.ancho)}x${Math.round(p.alto)}`;
+    cuenta.set(k, [...(cuenta.get(k) || []), p]);
+  }
+  const comun = [...cuenta.values()].sort((a, b) => b.length - a.length)[0]?.[0];
   const roles = info.paginas.map(() => "tripa");
-  if (distintas[0] != null) roles[distintas[0]] = "exterior";
-  if (distintas[1] != null) roles[distintas[1]] = "interior";
-  for (const i of distintas.slice(2)) roles[i] = "excluir";
+  if (!comun) return roles;
+  const grande = (p) => p.ancho > comun.ancho * 1.5 || p.alto > comun.alto * 1.3;
+  const caratulas = info.paginas.map((p, i) => (grande(p) ? i : -1)).filter((i) => i >= 0);
+  if (caratulas[0] != null) roles[caratulas[0]] = "exterior";
+  if (caratulas[1] != null) roles[caratulas[1]] = "interior";
+  for (const i of caratulas.slice(2)) roles[i] = "excluir";
   return roles;
 }
 
@@ -2205,6 +2214,8 @@ function calcularLibro() {
         ${tercera}
       </div>
       <p class="explicacion" style="margin-top:20px">${explicacion}</p>
+      ${t.plan.compaginacion === "" ? `<p class="verificado">✓ <b>Compaginación verificada:</b> se doblaron los pliegos tal como salen impresos (tiro, retiro y volteo) y cada cuadernillo queda en orden, con todas las páginas al derecho y el lomo donde va.</p>`
+        : t.plan.compaginacion ? `<div class="error-caja"><b>La compaginación no cuadra:</b> ${esc(t.plan.compaginacion)}. No imprimas este montaje; escríbenos con el PDF.</div>` : ""}
       <div class="acciones-resultado" style="margin-top:20px">
         <button class="boton boton-blanco" id="lb-generar" type="button">Descargar pliegos</button>
         <a class="boton boton-claro" href="#portada" id="lb-a-portada">Hacer la portada →</a>
@@ -2586,7 +2597,7 @@ function dialogoMaquina(m, main, datosIniciales = null) {
     <label class="campo"><span>Volteo del pliego para el retiro</span><select name="volteo">
       <option value="lateral" ${(v.volteo || "lateral") === "lateral" ? "selected" : ""}>De lado: la pinza se conserva (tira y retira)</option>
       <option value="cabeza" ${v.volteo === "cabeza" ? "selected" : ""}>De cabeza: la cola pasa a ser pinza (tumble)</option>
-    </select><small>Así se arma el retiro de libros, revistas y carátulas en esta máquina. Se puede cambiar en cada trabajo.</small></label>
+    </select><small>Así se arma el retiro de libros, revistas y caratulas en esta máquina. Se puede cambiar en cada trabajo.</small></label>
     <label class="campo"><span>Condición de impresión</span><select name="condicion">${CONDICIONES.map((c) => `<option ${c === v.salida.condicion ? "selected" : ""}>${c}</option>`).join("")}</select></label>
     <label class="campo"><span>Perfil ICC de salida (opcional)</span><input type="file" name="icc" accept=".icc,.icm"><small>Con el perfil, el PDF sale identificado como PDF/X con su OutputIntent.</small></label>
     ${interruptor("mq-jdf", "Su RIP/CTP recibe JDF", v.salida.jdf)}
