@@ -33,6 +33,11 @@ fn rgb_a_cmyk(r: f64, g: f64, b: f64) -> (f64, f64, f64, f64) {
 
 /// Solape (mm) de las franjas de rebase generado bajo la página.
 const SOLAPE: f64 = 0.2;
+/// Cuánto (mm) se deja pasar la página más allá del corte en los lados con
+/// rebase generado. Los visores en pantalla suavizan el borde del recorte y,
+/// si la página trae un fondo blanco debajo, dejan una línea clara de un
+/// píxel justo en el borde; así esa línea cae en el rebase y no sobre la imagen.
+const PASE: f64 = 0.25;
 /// Orilla de la página (mm) que se estira para generar el rebase.
 const ORILLA: f64 = 0.3;
 
@@ -527,14 +532,18 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                     colores[ciclo[(pos + 4 - pasos) % 4]]
                 };
                 let [pi, pb, pd, pa] = pide;
+                // La página primero, pasada un poco del corte; las franjas de color
+                // van encima, desde el borde de corte hacia afuera (tapan ese pase).
+                let pase = pide.map(|v| v.min(PASE));
+                colocar(&mut contenido, c.expandir(pase[0], pase[1], pase[2], pase[3]), &m, &nombre);
                 let bandas = [
-                    (0, Rect::new(r.x, r.y, pi + SOLAPE, r.alto)),
-                    (2, Rect::new(c.derecha() - SOLAPE, r.y, pd + SOLAPE, r.alto)),
-                    (1, Rect::new(c.x, r.y, c.ancho, pb + SOLAPE)),
-                    (3, Rect::new(c.x, c.arriba() - SOLAPE, c.ancho, pa + SOLAPE)),
+                    (0, Rect::new(r.x, r.y, pi, r.alto)),
+                    (2, Rect::new(c.derecha(), r.y, pd, r.alto)),
+                    (1, Rect::new(c.x, r.y, c.ancho, pb)),
+                    (3, Rect::new(c.x, c.arriba(), c.ancho, pa)),
                 ];
                 for (lado, zona) in bandas {
-                    if zona.ancho > SOLAPE + 1e-6 && zona.alto > SOLAPE + 1e-6 && pide[lado] > 0.01 {
+                    if zona.ancho > 1e-6 && zona.alto > 1e-6 && pide[lado] > 0.01 {
                         let [rr, gg, bb] = color_lado(lado);
                         let (rr, gg, bb) = (f64::from(rr), f64::from(gg), f64::from(bb));
                         // Con perfil de salida (PDF/X) el color va en CMYK; si no, en RGB,
@@ -554,7 +563,6 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                         );
                     }
                 }
-                colocar(&mut contenido, c, &m, &nombre);
             } else if (corr.rebase_espejo || estirado) && falta.iter().any(|f| *f) {
                 // Rebase generado sobre cada borde de corte que no tiene rebase
                 // suficiente (y sobre las esquinas): estirando la orilla de la
@@ -608,7 +616,7 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
                     }
                 }
                 // La página encima, con el rebase real que sí trae.
-                let propio = pide.map(|v| v.min(tiene));
+                let propio = pide.map(|v| v.min(tiene.max(PASE)));
                 colocar(&mut contenido, c.expandir(propio[0], propio[1], propio[2], propio[3]), &m, &nombre);
             } else {
                 colocar(&mut contenido, r, &m, &nombre);

@@ -444,8 +444,10 @@ function listaAvisos(avisos) {
 
 // ───────────── Miniaturas reales (pdf.js) ─────────────
 // pdf.js solo dibuja las miniaturas de la vista previa; el PDF de salida lo
-// escribe siempre el motor, sin rasterizar.
-const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38";
+// escribe siempre el motor, sin rasterizar. Va la versión «legacy»: la normal
+// no abre en iPhone/iPad con iOS anterior a 17.4 (y ahí también se mide el
+// color del fondo para el rebase).
+const PDFJS = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build";
 let pdfjsLib = null;
 async function cargarPdfjs() {
   if (!pdfjsLib) {
