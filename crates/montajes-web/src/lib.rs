@@ -681,6 +681,9 @@ struct PeticionLibro {
     volteo: Option<Volteo>,
     #[serde(default)]
     orientacion_papel: OrientacionPapel,
+    /// Páginas derechas, giradas 90° o automático.
+    #[serde(default = "auto")]
+    orientacion_paginas: Orientacion,
 }
 
 #[derive(Serialize)]
@@ -698,6 +701,7 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
     // pinza y la cola deben quedar iguales para que el retiro calce.
     let volteo = p.volteo.unwrap_or(p.maquina.volteo);
     let base = ParametrosLibro {
+        orientacion: p.orientacion_paginas,
         pliego: p.maquina.pliego_max,
         margenes: Margenes::de_maquina(&p.maquina).para_volteo(volteo),
         pagina: p.formato,

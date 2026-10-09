@@ -361,6 +361,9 @@ struct ArgsLibro {
     /// Volteo del retiro (por defecto el de la máquina).
     #[arg(long, value_enum)]
     volteo: Option<VolteoArg>,
+    /// Páginas derechas, giradas 90° o la que más rinda.
+    #[arg(long, value_enum, default_value = "auto")]
+    orientacion: OrientacionArg,
 }
 
 #[derive(Args)]
@@ -806,6 +809,11 @@ fn libro_cmd(datos: &Path, a: ArgsLibro) -> Result<()> {
     };
     let parametros = ParametrosLibro {
         volteo,
+        orientacion: match a.orientacion {
+            OrientacionArg::Auto => Orientacion::Auto,
+            OrientacionArg::Normal => Orientacion::Normal,
+            OrientacionArg::Girada => Orientacion::Girada,
+        },
         pliego: pliego_de(&m, a.pliego)?,
         margenes: Margenes::de_maquina(&m).para_volteo(volteo),
         pagina,

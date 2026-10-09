@@ -700,6 +700,23 @@ function conectarComparar(caja, o, redibujar) {
   $$("[data-usar-papel]", caja).forEach((b) => b.addEventListener("click", () => { o.papelTam = b.dataset.usarPapel; redibujar(); }));
 }
 
+/** Cuántos pliegos salen con las páginas derechas y con las páginas giradas. */
+function pintarOrientaciones(maquina) {
+  const caja = $("#lb-orientaciones");
+  const t = estado.libro;
+  if (!caja) return;
+  if (!t.info || !t.plan || !maquina) { caja.textContent = ""; return; }
+  const base = peticionLibro(maquina, t.info);
+  const prueba = (o) => {
+    try {
+      const r = JSON.parse(motor.planear_libro(JSON.stringify({ ...base, orientacion_paginas: o })));
+      const pp = Math.round(r.plan.paginas_libro / r.plan.pliegos_por_ejemplar);
+      return `${mm(r.plan.pliegos_por_ejemplar, 2)} pliegos por libro (${pp} págs. por pliego)`;
+    } catch { return "no entran"; }
+  };
+  caja.textContent = `Derechas: ${prueba("normal")} · Giradas 90°: ${prueba("girada")}.`;
+}
+
 function pintarCompararLibro() {
   const caja = $("#lb-comparar");
   if (!caja) return;
@@ -1385,6 +1402,7 @@ function vistaLibro(main) {
           </label>
           <div class="campo"><span>Páginas por firma</span>${chips("firma", [["auto", "Auto"], ["4", "4"], ["8", "8"], ["16", "16"], ["32", "32"], ["64", "64"]], o.firma)}</div>
           <label class="campo"><span>Cuadernillos a mano (opcional)</span><input type="text" id="lb-cuadernillos" value="${esc(o.cuadernillos || "")}" placeholder="Ej.: 16,16,16,8" autocomplete="off"><small>${textoCuadernillos(t)}</small></label>
+          <div class="campo"><span>Orientación de las páginas en el pliego</span>${chips("orientacionPaginas", [["auto", "Automática (la que más rinda)"], ["normal", "Derechas"], ["girada", "Giradas 90°"]], o.orientacionPaginas || "auto")}<div id="lb-orientaciones" class="tenue" style="font-size:13px"></div></div>
           <div class="campo"><span>Volteo del retiro</span>${chips("volteo", [["maquina", `Según la máquina${maquinaElegida("lb-maquina") ? ` (${maquinaElegida("lb-maquina").volteo === "cabeza" ? "de cabeza" : "de lado"})` : ""}`], ["lateral", "De lado"], ["cabeza", "De cabeza"]], o.volteo || "maquina")}<small>De lado: se voltea conservando la pinza. De cabeza: la cola pasa a ser pinza (pinza y cola se igualan).</small></div>
           <div class="campo"><span>Firmas por pliego</span>${chips("aprovechamiento", [["auto", "Auto"], ["una", "Una"], ["repetir", "Repetir"], ["tira_retira", "Tira y retira"]], o.aprovechamiento)}<small>Auto monta en tira y retira (una sola plancha para las dos caras) cuando la firma cabe dos veces lado a lado.</small></div>
           <details class="avanzado"><summary>Márgenes, lectura y marcas</summary>
@@ -1443,7 +1461,7 @@ function peticionLibro(maquina, info) {
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
     derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: o.aprovechamiento || "auto",
     volteo: !o.volteo || o.volteo === "maquina" ? null : o.volteo,
-    pliego: pliegoDe(o, maquina), orientacion_papel: orientacionPapel(o),
+    pliego: pliegoDe(o, maquina), orientacion_papel: orientacionPapel(o), orientacion_paginas: o.orientacionPaginas || "auto",
     titulo: base(estado.libro.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
   };
 }
@@ -1472,7 +1490,7 @@ function calcularLibro() {
     const girada = p.firmas.some((f) => f.girada);
     const o = t.op;
     const hoja = t.plan.pliego;
-    explicacion = `${p.paginas_libro} páginas en <span class="resaltado">${composicion}</span>${girada ? ", con la firma girada 90° para que quepa en el pliego" : ""}, en papel ${comoPapel(hoja)} de ${cm(hoja.ancho)} × ${cm(hoja.alto)} cm. `;
+    explicacion = `${p.paginas_libro} páginas en <span class="resaltado">${composicion}</span>${girada ? ", con las páginas giradas 90° en el pliego" : ", con las páginas derechas"}, en papel ${comoPapel(hoja)} de ${cm(hoja.ancho)} × ${cm(hoja.alto)} cm. `;
     explicacion += o.encuadernacion === "caballete" ? "Las firmas van anidadas una dentro de otra." : "Las firmas se alzan una tras otra" + (o.encuadernacion === "lomo" ? `, con ${mm(o.fresado)} mm de fresado en el lomo.` : ".");
     if (p.blancas) explicacion += ` Se agregan <b>${p.blancas}</b> páginas en blanco al final.`;
     const multiples = p.firmas.filter((f) => f.copias > 1);
@@ -1505,6 +1523,7 @@ function calcularLibro() {
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver las firmas" : "Sube el interior para ver las firmas", true)}`;
   pintarCotizacion("libro");
   pintarCompararLibro();
+  pintarOrientaciones(maquina);
   pintarCaratula();
   pintarGuardas();
   const carasLb = t.plan?.plan?.caras;

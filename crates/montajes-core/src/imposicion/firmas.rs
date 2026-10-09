@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::marcas::{self, Linea, OpcionesMarcas};
-use super::nup::bloque;
+use super::nup::{Orientacion, bloque};
 use super::plegado::{Esquema, Lado, Posicion};
 use super::{Cara, Margenes, Ubicacion, Volteo};
 use crate::geometria::{Rect, Tamano};
@@ -85,6 +85,14 @@ pub struct ParametrosLibro {
     /// márgenes de pinza y cola deben ser iguales (`Margenes::para_volteo`).
     #[serde(default)]
     pub volteo: Volteo,
+    /// Cómo van las páginas en el pliego: derechas, giradas 90° o la que
+    /// más rinda (más firmas por pliego).
+    #[serde(default = "orientacion_auto")]
+    pub orientacion: Orientacion,
+}
+
+fn orientacion_auto() -> Orientacion {
+    Orientacion::Auto
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,12 +164,32 @@ fn grilla(e: &Esquema, p: &ParametrosLibro) -> Grilla {
     Grilla { anchos, altos }
 }
 
+/// Orientación de la firma en el pliego (`true` = girada 90°): la pedida si
+/// entra, o en automático la que da más firmas por pliego (a igualdad, derecha).
+fn elegir_giro(g: &Grilla, p: &ParametrosLibro) -> Option<bool> {
+    let area = p.margenes.area_imprimible(p.pliego);
+    let borde = borde_marcas(p);
+    let (w, h) = (g.ancho() + borde, g.alto() + borde);
+    let normal = w <= area.ancho + 1e-6 && h <= area.alto + 1e-6;
+    let girada = h <= area.ancho + 1e-6 && w <= area.alto + 1e-6;
+    match p.orientacion {
+        Orientacion::Normal => normal.then_some(false),
+        Orientacion::Girada => girada.then_some(true),
+        Orientacion::Auto => match (normal, girada) {
+            (true, true) => Some(montaje(g, p, true).0.copias() > montaje(g, p, false).0.copias()),
+            (true, false) => Some(false),
+            (false, true) => Some(true),
+            (false, false) => None,
+        },
+    }
+}
+
 /// Páginas de la firma más grande que entra en el pliego (0 si ninguna).
 fn mayor_firma(p: &ParametrosLibro, paginas_libro: u32) -> u32 {
     TAMANOS_FIRMA
         .into_iter()
         .filter(|n| *n <= paginas_libro)
-        .find(|n| Esquema::estandar(*n).is_ok_and(|e| cabe(&grilla(&e, p), p).is_some()))
+        .find(|n| Esquema::estandar(*n).is_ok_and(|e| elegir_giro(&grilla(&e, p), p).is_some()))
         .unwrap_or(0)
 }
 
@@ -170,20 +198,6 @@ fn mayor_firma(p: &ParametrosLibro, paginas_libro: u32) -> u32 {
 /// solo se suma lo que las marcas pasan más allá de él.
 fn borde_marcas(p: &ParametrosLibro) -> f64 {
     2.0 * (p.marcas.espacio_necesario(p.rebase) - p.refile.max(p.rebase)).max(0.0)
-}
-
-/// `Some(girada)` si la firma cabe en el pliego (prefiere sin girar).
-fn cabe(g: &Grilla, p: &ParametrosLibro) -> Option<bool> {
-    let area = p.margenes.area_imprimible(p.pliego);
-    let borde = borde_marcas(p);
-    let (w, h) = (g.ancho() + borde, g.alto() + borde);
-    if w <= area.ancho + 1e-6 && h <= area.alto + 1e-6 {
-        Some(false)
-    } else if h <= area.ancho + 1e-6 && w <= area.alto + 1e-6 {
-        Some(true)
-    } else {
-        None
-    }
 }
 
 /// Explica por qué no entra la firma siguiente (el doble de páginas): cuánto
@@ -219,7 +233,7 @@ fn por_que_no_cabe_mas(p: &ParametrosLibro, mayor: u32, paginas_libro: u32) -> O
     );
     let entra = |q: &ParametrosLibro| {
         let g = grilla(&e, q);
-        cabe(&g, q).is_some()
+        elegir_giro(&g, q).is_some()
     };
     let sin_marcas = ParametrosLibro { marcas: OpcionesMarcas::ninguna(), ..p.clone() };
     let justo = ParametrosLibro { refile: 1.0, rebase: 1.0, fresado: 0.0, ..sin_marcas.clone() };
@@ -377,7 +391,7 @@ pub fn planificar(original: &ParametrosLibro) -> Resultado<PlanLibro> {
     let mut esquemas = Vec::new();
     for n in TAMANOS_FIRMA {
         let e = Esquema::estandar(n)?;
-        if let Some(girada) = cabe(&grilla(&e, p), p) {
+        if let Some(girada) = elegir_giro(&grilla(&e, p), p) {
             esquemas.push((n, e, girada));
         }
     }
@@ -646,6 +660,7 @@ mod pruebas {
             cuadernillos: vec![],
             mapa: vec![],
             volteo: Volteo::Lateral,
+            orientacion: Orientacion::Auto,
         }
     }
 
@@ -757,6 +772,21 @@ mod pruebas {
                 assert_eq!(v.giro, (l.giro + 180) % 360);
             }
         }
+    }
+
+    #[test]
+    fn orientacion_de_las_paginas_forzada_o_la_que_mas_rinde() {
+        // A5 de 8 pp: el bloque mide unos 308 × 432 mm.
+        let mut p = libro(8, Encuadernacion::Lomo);
+        p.aprovechamiento = Aprovechamiento::Repetir;
+        p.pliego = Tamano::new(720.0, 520.0);
+        let derecha = planificar(&ParametrosLibro { orientacion: Orientacion::Normal, ..p.clone() }).unwrap();
+        assert!(!derecha.firmas[0].girada);
+        let girada = planificar(&ParametrosLibro { orientacion: Orientacion::Girada, ..p.clone() }).unwrap();
+        assert!(girada.firmas[0].girada);
+        // En automático gana la que da más firmas por pliego.
+        let auto = planificar(&p).unwrap();
+        assert_eq!(auto.firmas[0].copias, derecha.firmas[0].copias.max(girada.firmas[0].copias));
     }
 
     #[test]
