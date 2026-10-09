@@ -425,3 +425,4 @@ body.acceso main { display: grid; place-items: center; min-height: 70vh; positio
 .pagina-rol.rol-guarda { border-color: var(--azul); background: color-mix(in srgb, var(--azul) 12%, var(--superficie)); }
 .aviso-dobles { display: grid; gap: 10px; justify-items: start; padding: 14px 16px; border-radius: 14px; font-size: 14px; background: color-mix(in srgb, var(--naranja) 12%, var(--superficie)); }
 .comparar-papel .fila-actual td { background: color-mix(in srgb, var(--lima) 22%, transparent); }
+.fila-escala { display: flex; gap: 10px; align-items: center; } .fila-escala input { max-width: 120px; }

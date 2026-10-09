@@ -128,6 +128,29 @@ fn pliego(m: &Maquina, pedido: Option<Tamano>) -> R<Tamano> {
     Ok(p)
 }
 
+fn escala_uno() -> f64 {
+    1.0
+}
+
+/// Escala válida (entre 10 % y 400 %).
+fn escala_valida(e: f64) -> R<f64> {
+    if !(0.1..=4.0).contains(&e) {
+        return Err(error("la escala debe estar entre 10 % y 400 %"));
+    }
+    Ok(e)
+}
+
+/// Marca la escala del arte en cada página colocada.
+fn aplicar_escala(caras: &mut [Cara], escala: f64) {
+    if (escala - 1.0).abs() > 1e-9 {
+        for c in caras {
+            for u in &mut c.ubicaciones {
+                u.escala = escala;
+            }
+        }
+    }
+}
+
 /// Cómo se acomoda el papel en la máquina.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -283,6 +306,9 @@ struct PeticionNup {
     pliego: Option<Tamano>,
     #[serde(default)]
     orientacion_papel: OrientacionPapel,
+    /// Escala del arte (1 = tamaño real; 0,9 = reducido al 90 %).
+    #[serde(default = "escala_uno")]
+    escala: f64,
     #[serde(default = "tres")]
     rebase: f64,
     #[serde(default)]
@@ -334,6 +360,7 @@ fn plan_nup(p: &PeticionNup) -> R<(ParametrosNup, Distribucion, Vec<Cara>)> {
     if p.dorso && !p.maquina.duplex {
         margenes = margenes.para_volteo(p.volteo);
     }
+    let escala = escala_valida(p.escala)?;
     // El papel horizontal o vertical: gana el que da más piezas por pliego.
     let mut mejor: Option<(ParametrosNup, Distribucion)> = None;
     let mut ultimo_error = None;
@@ -341,7 +368,7 @@ fn plan_nup(p: &PeticionNup) -> R<(ParametrosNup, Distribucion, Vec<Cara>)> {
         let par = ParametrosNup {
             pliego: hoja,
             margenes,
-            pieza: p.formato,
+            pieza: Tamano::new(p.formato.ancho * escala, p.formato.alto * escala),
             rebase: p.rebase,
             calle: p.calle,
             orientacion: p.orientacion,
@@ -360,7 +387,8 @@ fn plan_nup(p: &PeticionNup) -> R<(ParametrosNup, Distribucion, Vec<Cara>)> {
         Some(x) => x,
         None => return Err(error(ultimo_error.map(|e| e.to_string()).unwrap_or_default())),
     };
-    let caras = nup::caras_trabajo(&parametros, &d, p.paginas, p.dorso.then_some(p.volteo));
+    let mut caras = nup::caras_trabajo(&parametros, &d, p.paginas, p.dorso.then_some(p.volteo));
+    aplicar_escala(&mut caras, escala);
     Ok((parametros, d, caras))
 }
 
@@ -431,7 +459,8 @@ fn plan_combinado(p: &PeticionCombinado) -> R<(ParametrosNup, Distribucion, Plan
         parametros.margenes = Margenes::de_maquina(&p.nup.maquina).para_volteo(p.nup.volteo);
     }
     let d = if con_dorso { nup::calcular(&parametros).map_err(error)? } else { d };
-    let plan = nup::combinar(&parametros, &d, &p.disenos, p.nup.volteo).map_err(error)?;
+    let mut plan = nup::combinar(&parametros, &d, &p.disenos, p.nup.volteo).map_err(error)?;
+    aplicar_escala(&mut plan.caras, p.nup.escala);
     Ok((parametros, d, plan))
 }
 
@@ -684,6 +713,9 @@ struct PeticionLibro {
     /// Páginas derechas, giradas 90° o automático.
     #[serde(default = "auto")]
     orientacion_paginas: Orientacion,
+    /// Escala del arte (1 = tamaño real).
+    #[serde(default = "escala_uno")]
+    escala: f64,
 }
 
 #[derive(Serialize)]
@@ -700,11 +732,12 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
     // Volteo del retiro: el de la petición o el de la máquina. De cabeza, la
     // pinza y la cola deben quedar iguales para que el retiro calce.
     let volteo = p.volteo.unwrap_or(p.maquina.volteo);
+    let escala = escala_valida(p.escala)?;
     let base = ParametrosLibro {
         orientacion: p.orientacion_paginas,
         pliego: p.maquina.pliego_max,
         margenes: Margenes::de_maquina(&p.maquina).para_volteo(volteo),
-        pagina: p.formato,
+        pagina: Tamano::new(p.formato.ancho * escala, p.formato.alto * escala),
         paginas: if p.mapa.is_empty() { p.paginas } else { p.mapa.len() as u32 },
         encuadernacion: p.encuadernacion,
         firma: p.firma,
@@ -739,10 +772,11 @@ fn plan_libro(p: &PeticionLibro) -> R<(ParametrosLibro, PlanLibro, Option<f64>)>
             Err(e) => ultimo_error = Some(e),
         }
     }
-    let (parametros, plan) = match mejor {
+    let (parametros, mut plan) = match mejor {
         Some(x) => x,
         None => return Err(error(ultimo_error.map(|e| e.to_string()).unwrap_or_default())),
     };
+    aplicar_escala(&mut plan.caras, escala);
     let lomo = p.calibre_um.map(|c| f64::from(plan.paginas_libro / 2) * c / 1000.0);
     Ok((parametros, plan, lomo))
 }

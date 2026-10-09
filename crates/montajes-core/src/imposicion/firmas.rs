@@ -531,6 +531,7 @@ fn caras_firma(
                     corte: corrido,
                     giro: if pos.invertida { 180 } else { 0 },
                     recorte: corrido.expandir(p.rebase, p.rebase, p.rebase, p.rebase).interseccion(&celda),
+                    escala: 1.0,
                 }
             });
 
@@ -592,6 +593,7 @@ fn caras_firma(
                 corte: transformar(lado, u.corte),
                 recorte: transformar(lado, u.recorte),
                 giro: (u.giro + giro_extra(lado)) % 360,
+                escala: u.escala,
             })
             .collect();
         let mut marcas = marcas::generar(&cortes, p.pliego, &area_real, p.rebase, &p.marcas);

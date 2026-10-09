@@ -241,7 +241,7 @@ pub fn posicion_codigo(c: &Portada, ancho: f64, alto: f64) -> Option<(f64, f64)>
 pub fn cara_completa(c: &Portada, pagina: usize, op: &OpcionesMarcas) -> Cara {
     let (mut cara, corte) = cara_base(c, op);
     let r = c.rebase;
-    cara.ubicaciones.push(Ubicacion { pagina, corte, giro: 0, recorte: corte.expandir(r, r, r, r) });
+    cara.ubicaciones.push(Ubicacion { pagina, corte, giro: 0, recorte: corte.expandir(r, r, r, r), escala: 1.0 });
     cara
 }
 
@@ -273,7 +273,7 @@ pub fn cara_armada(c: &Portada, asignacion: &[(TipoPanel, usize, Tamano)], op: &
             lado(r.derecha() > c.tamano.ancho - eps),
             lado(r.arriba() > c.tamano.alto - eps),
         );
-        cara.ubicaciones.push(Ubicacion { pagina, corte: destino, giro: 0, recorte });
+        cara.ubicaciones.push(Ubicacion { pagina, corte: destino, giro: 0, recorte, escala: 1.0 });
     }
     Ok(cara)
 }

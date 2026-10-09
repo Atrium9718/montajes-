@@ -141,7 +141,13 @@ pub fn cara_tiro_posiciones(p: &ParametrosNup, d: &Distribucion, paginas: &[Opti
         .iter()
         .zip(paginas)
         .filter_map(|(&corte, pagina)| {
-            pagina.map(|pagina| Ubicacion { pagina, corte, giro, recorte: recorte(corte, bloque, p.rebase, p.calle) })
+            pagina.map(|pagina| Ubicacion {
+                pagina,
+                corte,
+                giro,
+                recorte: recorte(corte, bloque, p.rebase, p.calle),
+                escala: 1.0,
+            })
         })
         .collect();
     Cara {
@@ -182,6 +188,7 @@ pub fn cara_retiro_posiciones(p: &ParametrosNup, d: &Distribucion, paginas: &[Op
                     Volteo::Lateral => giro,
                     Volteo::Cabeza => (giro + 180) % 360,
                 },
+                escala: 1.0,
             })
         })
         .collect::<Vec<_>>();

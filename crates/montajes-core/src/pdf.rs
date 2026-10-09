@@ -485,11 +485,18 @@ pub fn componer(fuente: Fuente, caras: &[Cara], opciones: &OpcionesSalida) -> Re
             let nombre = format!("P{}", u.pagina + 1);
             xobjetos.set(nombre.as_bytes(), Object::Reference(formas[&u.pagina]));
             let giro = (p.giro + u.giro) % 360;
-            let m = matriz_colocacion(&p.corte, giro, mm_a_pt(u.corte.x), mm_a_pt(u.corte.y));
+            let mut m = matriz_colocacion(&p.corte, giro, mm_a_pt(u.corte.x), mm_a_pt(u.corte.y));
+            let s = if u.escala > 0.0 { u.escala } else { 1.0 };
+            if (s - 1.0).abs() > 1e-9 {
+                // Arte reducido o ampliado: ya colocado, se escala alrededor de la
+                // esquina de corte en el pliego (vale para cualquier giro).
+                let (tx, ty) = (mm_a_pt(u.corte.x), mm_a_pt(u.corte.y));
+                m = multiplicar(&m, &[s, 0.0, 0.0, s, tx * (1.0 - s), ty * (1.0 - s)]);
+            }
             let (c, r) = (u.corte, u.recorte);
             // Cuánto rebase pide cada lado: izquierda, abajo, derecha, arriba.
             let pide = [c.x - r.x, c.y - r.y, r.derecha() - c.derecha(), r.arriba() - c.arriba()];
-            let tiene = p.rebase_disponible();
+            let tiene = p.rebase_disponible() * s;
             let falta = pide.map(|v| v > tiene + 0.05);
             if opciones.correcciones.rebase_espejo && falta.iter().any(|f| *f) {
                 // Rebase en espejo: se refleja la página sobre cada borde de corte

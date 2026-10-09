@@ -65,6 +65,14 @@ pub struct Ubicacion {
     pub giro: u16,
     /// Hasta dónde se deja ver la página (corte + rebase permitido).
     pub recorte: Rect,
+    /// Escala del arte (1 = tamaño real). El corte ya viene reducido; la
+    /// página se escala para llenarlo.
+    #[serde(default = "escala_uno")]
+    pub escala: f64,
+}
+
+fn escala_uno() -> f64 {
+    1.0
 }
 
 /// Una cara de un pliego (tiro o retiro).

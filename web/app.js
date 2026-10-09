@@ -523,7 +523,9 @@ function svgCara(cara, maquina, opciones = {}) {
       // Página real: CropBox dibujada por pdf.js, llevada al pliego con la
       // matriz del motor y recortada al rebase permitido.
       const [vx0, vy0, vx1, vy1] = pag.vista;
-      const m = matrizColocacion(pag.corte, (pag.giro + u.giro) % 360, u.corte.x, u.corte.y);
+      let m = matrizColocacion(pag.corte, (pag.giro + u.giro) % 360, u.corte.x, u.corte.y);
+      const s = u.escala ?? 1;
+      if (Math.abs(s - 1) > 1e-9) m = multiplicar(m, [s, 0, 0, s, u.corte.x * (1 - s), u.corte.y * (1 - s)]);
       const t = multiplicar(multiplicar([1, 0, 0, -1, vx0, vy1], m), [1, 0, 0, -1, 0, H]);
       const id = `rc-${opciones.clave || "c"}-${k}`;
       partes.push(`<clipPath id="${id}">${r(u.recorte)}</clipPath><g clip-path="url(#${id})"><image href="${imagen}" x="0" y="0" width="${vx1 - vx0}" height="${vy1 - vy0}" preserveAspectRatio="none" transform="matrix(${t.map((v) => +v.toFixed(4)).join(" ")})"/></g>`);
@@ -696,6 +698,49 @@ function tarjetaComparar(prefijo, filas, actual, digital) {
   </section>`;
 }
 
+// ───────────── Escala del arte ─────────────
+const escalaDe = (o) => Math.min(400, Math.max(10, Number(o.escala) || 100)) / 100;
+function campoEscala(prefijo, o, formato) {
+  const e = escalaDe(o);
+  const tam = formato ? ` → queda de <b>${cm(formato.ancho * e)} × ${cm(formato.alto * e)} cm</b>` : "";
+  return `<div class="campo"><span>Escala del arte (%)</span>
+    <div class="fila-escala"><input type="number" id="${prefijo}-escala" min="10" max="400" step="1" value="${Math.round(e * 100)}">
+      ${e !== 1 ? `<button type="button" class="boton boton-claro boton-chico" id="${prefijo}-escala-100">Volver a 100 %</button>` : ""}</div>
+    <small>${formato ? `Tamaño original ${cm(formato.ancho)} × ${cm(formato.alto)} cm${tam}.` : "Reduce el arte para que entren más por pliego."}</small>
+    <div id="${prefijo}-escala-sugerencia"></div></div>`;
+}
+function conectarEscala(prefijo, o, alCambiar) {
+  $(`#${prefijo}-escala`)?.addEventListener("change", (e) => {
+    e.stopPropagation();
+    o.escala = Math.min(400, Math.max(10, Math.round(num(e.target.value, 100))));
+    alCambiar();
+  });
+  $(`#${prefijo}-escala-100`)?.addEventListener("click", () => { o.escala = 100; alCambiar(); });
+}
+/**
+ * Busca la menor reducción (de 99 % hacia 70 %) que mejora el montaje.
+ * `medir(escala)` devuelve un número a maximizar (piezas, o −pliegos) o null.
+ */
+function sugerirEscala(prefijo, o, formato, medir, describir, alUsar) {
+  const caja = $(`#${prefijo}-escala-sugerencia`);
+  if (!caja || !formato) return;
+  const actual = escalaDe(o);
+  const base = medir(actual);
+  let html = "";
+  if (base != null) {
+    for (let pct = Math.round(actual * 100) - 1; pct >= 70; pct--) {
+      const v = medir(pct / 100);
+      if (v != null && v > base + 1e-9) {
+        html = `<div class="aviso-dobles">Al <b>${pct} %</b> ${describir(v, base)}: el arte queda de <b>${cm(formato.ancho * pct / 100)} × ${cm(formato.alto * pct / 100)} cm</b>.
+          <button type="button" class="boton boton-naranja boton-chico" data-usar-escala="${pct}">Usar ${pct} %</button></div>`;
+        break;
+      }
+    }
+  }
+  if (!pintar(caja, html)) return;
+  $("[data-usar-escala]", caja)?.addEventListener("click", (e) => { o.escala = Number(e.currentTarget.dataset.usarEscala); alUsar(); });
+}
+
 function conectarComparar(caja, o, redibujar) {
   $$("[data-usar-papel]", caja).forEach((b) => b.addEventListener("click", () => { o.papelTam = b.dataset.usarPapel; redibujar(); }));
 }
@@ -793,6 +838,7 @@ function vistaPiezas(main) {
             <label class="campo"><span>Calle (mm)</span><input type="number" step="0.5" min="0" id="pz-calle" value="${o.calle}"><small>0 = corte compartido</small></label>
           </div>
           <div class="campo"><span>Orientación</span>${chips("orientacion", [["auto", "Automática"], ["normal", "Normal"], ["girada", "Girada 90°"]], o.orientacion)}</div>
+          ${campoEscala("pz", o, t.info?.formato)}
           ${selectorPapel("pz", o, maquinaElegida("pz-maquina"), null)}
           ${interruptor("pz-dorso", "Frente y dorso (páginas en pares)", o.dorso)}
           ${o.dorso ? `<div class="campo"><span>Volteo del pliego</span>${chips("volteo", [["lateral", "Tira y retira (lateral)"], ["cabeza", "De cabeza (tumble)"]], o.volteo)}</div>` : ""}
@@ -830,8 +876,9 @@ function vistaPiezas(main) {
   };
   conectarCorrecciones(main, () => vistaPiezas(main));
   conectarSelectorPapel("pz", o, (redibujar) => (redibujar ? vistaPiezas(main) : calcularPiezas()));
+  conectarEscala("pz", o, () => vistaPiezas(main));
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file" || el.dataset.correccion || el.dataset.cantidad || /papel-tam|pliego-(ancho|alto)/.test(el.id)) return;
+    if (el.type === "file" || el.dataset.correccion || el.dataset.cantidad || /papel-tam|pliego-(ancho|alto)|-escala/.test(el.id)) return;
     const antes = { dorso: o.dorso, rebase: o.rebase, maquina: estado.preferencias.maquina };
     leerOpciones();
     if (antes.rebase !== o.rebase || antes.maquina !== estado.preferencias.maquina) { revisarArchivo(t); vistaPiezas(main); return; }
@@ -899,7 +946,7 @@ function peticionPiezas(maquina, info, orientacion) {
   const o = estado.piezas.op;
   const pliego = pliegoDe(o, maquina);
   return {
-    maquina, formato: info.formato, paginas: info.paginas.length, pliego, orientacion_papel: orientacionPapel(o),
+    maquina, formato: info.formato, paginas: info.paginas.length, pliego, orientacion_papel: orientacionPapel(o), escala: escalaDe(o),
     rebase: o.rebase, calle: o.calle, orientacion: orientacion || o.orientacion,
     dorso: o.dorso, volteo: o.volteo, marcas: o.marcas, tira_color: o.tira,
     titulo: base(estado.piezas.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
@@ -938,6 +985,7 @@ function calcularPiezas() {
         explicacion = `Van <span class="resaltado">${d.columnas} columnas × ${d.filas} filas</span>${t.op.calle > 0 ? `, con ${mm(t.op.calle)} mm de calle` : ", con corte compartido"}.`;
       }
       if (t.plan?.pliego) explicacion += ` Papel ${comoPapel(t.plan.pliego)} de ${cm(t.plan.pliego.ancho)} × ${cm(t.plan.pliego.alto)} cm.`;
+      if (escalaDe(t.op) !== 1 && t.info?.formato) explicacion += ` Arte al <span class="resaltado">${Math.round(escalaDe(t.op) * 100)} %</span>: queda de ${cm(t.info.formato.ancho * escalaDe(t.op))} × ${cm(t.info.formato.alto * escalaDe(t.op))} cm.`;
     } catch (e) { errorPlan = String(e.message || e); }
   }
   const d = t.plan?.distribucion;
@@ -961,6 +1009,12 @@ function calcularPiezas() {
     ${tarjetaVistaPrevia(t, maquina, t.archivo ? "Ajusta las opciones para ver el pliego" : "Sube un PDF para ver el montaje")}`;
   pintarCotizacion("piezas");
   pintarCompararPiezas();
+  if (t.info?.formato && t.plan && maquina && t.op.modo === "repetir") {
+    const base = peticionPiezas(maquina, t.info);
+    sugerirEscala("pz", t.op, t.info.formato, (e) => {
+      try { const d = JSON.parse(motor.planear_nup(JSON.stringify({ ...base, escala: e }))).distribucion; return d.columnas * d.filas; } catch { return null; }
+    }, (v, b) => `entran <b>${v}</b> por pliego en vez de ${b}`, () => vistaPiezas($("#vista")));
+  }
   const carasPz = t.plan?.caras ?? t.plan?.plan?.caras;
   if (carasPz?.length) pedirMiniaturas(t, carasPz[Math.min(t.cara, carasPz.length - 1)].ubicaciones.map((u) => u.pagina), calcularPiezas);
   if (!pintar(caja, html)) return;
@@ -1402,6 +1456,7 @@ function vistaLibro(main) {
           </label>
           <div class="campo"><span>Páginas por firma</span>${chips("firma", [["auto", "Auto"], ["4", "4"], ["8", "8"], ["16", "16"], ["32", "32"], ["64", "64"]], o.firma)}</div>
           <label class="campo"><span>Cuadernillos a mano (opcional)</span><input type="text" id="lb-cuadernillos" value="${esc(o.cuadernillos || "")}" placeholder="Ej.: 16,16,16,8" autocomplete="off"><small>${textoCuadernillos(t)}</small></label>
+          ${campoEscala("lb", o, t.info ? formatoTripa(t) : null)}
           <div class="campo"><span>Orientación de las páginas en el pliego</span>${chips("orientacionPaginas", [["auto", "Automática (la que más rinda)"], ["normal", "Derechas"], ["girada", "Giradas 90°"]], o.orientacionPaginas || "auto")}<div id="lb-orientaciones" class="tenue" style="font-size:13px"></div></div>
           <div class="campo"><span>Volteo del retiro</span>${chips("volteo", [["maquina", `Según la máquina${maquinaElegida("lb-maquina") ? ` (${maquinaElegida("lb-maquina").volteo === "cabeza" ? "de cabeza" : "de lado"})` : ""}`], ["lateral", "De lado"], ["cabeza", "De cabeza"]], o.volteo || "maquina")}<small>De lado: se voltea conservando la pinza. De cabeza: la cola pasa a ser pinza (pinza y cola se igualan).</small></div>
           <div class="campo"><span>Firmas por pliego</span>${chips("aprovechamiento", [["auto", "Auto"], ["una", "Una"], ["repetir", "Repetir"], ["tira_retira", "Tira y retira"]], o.aprovechamiento)}<small>Auto monta en tira y retira (una sola plancha para las dos caras) cuando la firma cabe dos veces lado a lado.</small></div>
@@ -1428,8 +1483,9 @@ function vistaLibro(main) {
   $("#lb-cambiar")?.addEventListener("click", () => { t.archivo = null; t.info = null; t.plan = null; t.error = null; vistaLibro(main); });
   conectarCorrecciones(main, () => vistaLibro(main));
   conectarSelectorPapel("lb", o, (redibujar) => { t.cara = 0; if (redibujar) vistaLibro(main); else calcularLibro(); });
+  conectarEscala("lb", o, () => { t.cara = 0; vistaLibro(main); });
   $$("input, select", main).forEach((el) => el.addEventListener("change", () => {
-    if (el.type === "file" || el.dataset.correccion || el.dataset.rol || /papel-tam|pliego-(ancho|alto)/.test(el.id)) return;
+    if (el.type === "file" || el.dataset.correccion || el.dataset.rol || /papel-tam|pliego-(ancho|alto)|-escala/.test(el.id)) return;
     const antes = { rebase: o.rebase, maquina: estado.preferencias.maquina };
     o.cuadernillos = $("#lb-cuadernillos").value.trim();
     $("#lb-cuadernillos").nextElementSibling.textContent = textoCuadernillos(t);
@@ -1461,7 +1517,7 @@ function peticionLibro(maquina, info) {
     calibre_um: papel && (o.creep || o.encuadernacion !== "caballete") ? papel.calibre_um : null,
     derecha_a_izquierda: o.rtl, marcas: o.marcas, tira_color: o.tira, aprovechamiento: o.aprovechamiento || "auto",
     volteo: !o.volteo || o.volteo === "maquina" ? null : o.volteo,
-    pliego: pliegoDe(o, maquina), orientacion_papel: orientacionPapel(o), orientacion_paginas: o.orientacionPaginas || "auto",
+    pliego: pliegoDe(o, maquina), orientacion_papel: orientacionPapel(o), orientacion_paginas: o.orientacionPaginas || "auto", escala: escalaDe(o),
     titulo: base(estado.libro.archivo?.nombre), fecha: ahora(), correcciones: correcciones(),
   };
 }
@@ -1491,6 +1547,8 @@ function calcularLibro() {
     const o = t.op;
     const hoja = t.plan.pliego;
     explicacion = `${p.paginas_libro} páginas en <span class="resaltado">${composicion}</span>${girada ? ", con las páginas giradas 90° en el pliego" : ", con las páginas derechas"}, en papel ${comoPapel(hoja)} de ${cm(hoja.ancho)} × ${cm(hoja.alto)} cm. `;
+    const esc0 = escalaDe(t.op);
+    if (esc0 !== 1) { const f0 = formatoTripa(t); explicacion += `Arte al <span class="resaltado">${Math.round(esc0 * 100)} %</span>: cada página queda de ${cm(f0.ancho * esc0)} × ${cm(f0.alto * esc0)} cm. `; }
     explicacion += o.encuadernacion === "caballete" ? "Las firmas van anidadas una dentro de otra." : "Las firmas se alzan una tras otra" + (o.encuadernacion === "lomo" ? `, con ${mm(o.fresado)} mm de fresado en el lomo.` : ".");
     if (p.blancas) explicacion += ` Se agregan <b>${p.blancas}</b> páginas en blanco al final.`;
     const multiples = p.firmas.filter((f) => f.copias > 1);
@@ -1524,6 +1582,12 @@ function calcularLibro() {
   pintarCotizacion("libro");
   pintarCompararLibro();
   pintarOrientaciones(maquina);
+  if (t.info && t.plan && maquina) {
+    const base = peticionLibro(maquina, t.info);
+    sugerirEscala("lb", t.op, formatoTripa(t), (e) => {
+      try { return -JSON.parse(motor.planear_libro(JSON.stringify({ ...base, escala: e }))).plan.pliegos_por_ejemplar; } catch { return null; }
+    }, (v, b) => `salen ${mm(-v, 2)} pliegos por libro en vez de ${mm(-b, 2)}`, () => { t.cara = 0; vistaLibro($("#vista")); });
+  }
   pintarCaratula();
   pintarGuardas();
   const carasLb = t.plan?.plan?.caras;
