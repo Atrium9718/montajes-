@@ -107,7 +107,7 @@ fn espacio(doc: &Document, o: &Object, recursos: Option<&Dictionary>, profundida
             let n = a
                 .get(1)
                 .and_then(|s| resolver(doc, s).as_stream().ok())
-                .and_then(|s| s.dict.get(b"N").ok().and_then(|n| n.as_i64().ok()));
+                .and_then(|s| s.dict.get(b"N").ok().and_then(|n| resolver(doc, n).as_i64().ok()));
             match n {
                 Some(1) => Espacio::Gris,
                 Some(3) => Espacio::Rgb,
@@ -175,13 +175,26 @@ impl Conversor {
         self.hechos.insert(id, nuevo);
         let datos = s.decompressed_content().unwrap_or_else(|_| s.content.clone());
         let recursos = s.dict.get(b"Resources").ok().and_then(|r| resolver(doc, r).as_dict().ok()).cloned();
-        let contenido = self.contenido(doc, &datos, recursos.as_ref(), profundidad);
+        let (mut nuevos, sombras) = match &recursos {
+            Some(r) => self.recursos(doc, r, profundidad),
+            None => (Dictionary::new(), Vec::new()),
+        };
+        let (contenido, extra) = self.contenido(doc, &datos, recursos.as_ref(), &sombras);
+        // Degradados e imágenes incrustadas que van con máscara: nuevos XObjects.
+        if !sombras.is_empty() || !extra.is_empty() {
+            let mut x =
+                nuevos.get(b"XObject").ok().and_then(|t| resolver(doc, t).as_dict().ok()).cloned().unwrap_or_default();
+            for (n, id) in sombras.iter().map(|(n, id)| (nombre_sombra(n), *id)).chain(extra) {
+                x.set(n, Object::Reference(id));
+            }
+            nuevos.set("XObject", x);
+        }
         let mut dict = s.dict.clone();
         dict.remove(b"Filter");
         dict.remove(b"DecodeParms");
         dict.remove(b"Length");
-        if let Some(r) = recursos {
-            dict.set("Resources", self.recursos(doc, &r, profundidad));
+        if recursos.is_some() || !nuevos.is_empty() {
+            dict.set("Resources", nuevos);
         }
         // El grupo de transparencia también pasa a gris.
         if let Ok(Object::Dictionary(g)) = dict.get(b"Group").map(|g| resolver(doc, g).clone()) {
@@ -197,8 +210,16 @@ impl Conversor {
         nuevo
     }
 
-    /// Recursos con sus imágenes, formas, degradados y patrones en gris.
-    fn recursos(&mut self, doc: &mut Document, r: &Dictionary, profundidad: usize) -> Dictionary {
+    /// Recursos con sus imágenes, formas, degradados y patrones en gris. Los
+    /// degradados que no se pueden convertir se devuelven aparte, con la forma
+    /// que los pinta en negro por máscara (para cambiar sus `sh`).
+    fn recursos(
+        &mut self,
+        doc: &mut Document,
+        r: &Dictionary,
+        profundidad: usize,
+    ) -> (Dictionary, Vec<(Vec<u8>, ObjectId)>) {
+        let mut sombras = Vec::new();
         let mut salida = r.clone();
         for clave in [&b"XObject"[..], b"Shading", b"Pattern"] {
             let Some(tabla) = r.get(clave).ok().and_then(|t| resolver(doc, t).as_dict().ok()).cloned() else {
@@ -208,7 +229,20 @@ impl Conversor {
             for (n, v) in tabla.iter() {
                 let convertido = match (clave, v) {
                     (b"XObject", Object::Reference(id)) => self.xobjeto(doc, *id, profundidad),
-                    (b"Shading", v) => self.sombreado(doc, v),
+                    (b"Shading", v) => match self.sombreado_gris(doc, v) {
+                        Some(o) => o,
+                        None => {
+                            let grande = [-30000.0, -30000.0, 30000.0, 30000.0];
+                            let forma = self.negro_por_mascara(
+                                doc,
+                                b"/S sh".to_vec(),
+                                dictionary! { "Shading" => dictionary! { "S" => v.clone() } },
+                                grande,
+                            );
+                            sombras.push((n.clone(), forma));
+                            v.clone()
+                        }
+                    },
                     (b"Pattern", Object::Reference(id)) => self.patron(doc, *id, profundidad),
                     _ => v.clone(),
                 };
@@ -216,7 +250,7 @@ impl Conversor {
             }
             salida.set(clave.to_vec(), nueva);
         }
-        salida
+        (salida, sombras)
     }
 
     fn xobjeto(&mut self, doc: &mut Document, id: ObjectId, profundidad: usize) -> Object {
@@ -261,27 +295,25 @@ impl Conversor {
     /// Degradado en gris: se pasan a gris los colores de su función (tipos 2
     /// y 3, los que hacen los programas de diseño para degradados).
     fn sombreado(&mut self, doc: &mut Document, o: &Object) -> Object {
+        self.sombreado_gris(doc, o).unwrap_or_else(|| {
+            self.avisar("hay degradados dentro de patrones que quedaron en color");
+            o.clone()
+        })
+    }
+
+    /// Degradado convertido a gris, o `None` si no se puede (malla, funciones raras).
+    fn sombreado_gris(&mut self, doc: &mut Document, o: &Object) -> Option<Object> {
         let id = o.as_reference().ok();
         if let Some(hecho) = id.and_then(|i| self.hechos.get(&i)) {
-            return Object::Reference(*hecho);
+            return Some(Object::Reference(*hecho));
         }
         let mut d = match resolver(doc, o) {
             Object::Dictionary(d) => d.clone(),
-            Object::Stream(_) => {
-                self.avisar("hay degradados de malla que quedaron en color");
-                return o.clone();
-            }
-            _ => return o.clone(),
+            _ => return None,
         };
         let cs = d.get(b"ColorSpace").map_or(Espacio::Otro, |c| espacio(doc, c, None, 0));
-        let Some(f) = d.get(b"Function").ok().cloned() else {
-            self.avisar("hay degradados que quedaron en color");
-            return o.clone();
-        };
-        let Some(f) = funcion_gris(doc, &f, &cs) else {
-            self.avisar("hay degradados que quedaron en color");
-            return o.clone();
-        };
+        let f = d.get(b"Function").ok().cloned()?;
+        let f = funcion_gris(doc, &f, &cs)?;
         d.set("Function", f);
         d.set("ColorSpace", "DeviceGray");
         if let Ok(fondo) = d.get(b"Background").and_then(|b| b.as_array()).map(|a| numeros(a)) {
@@ -296,7 +328,7 @@ impl Conversor {
         if let Some(i) = id {
             self.hechos.insert(i, nuevo);
         }
-        Object::Reference(nuevo)
+        Some(Object::Reference(nuevo))
     }
 
     /// Imagen en gris de 8 bits (Flate). Las máscaras y las que ya son grises
@@ -314,17 +346,70 @@ impl Conversor {
         if matches!(cs, Espacio::Gris) {
             return id;
         }
-        match self.imagen_gris(doc, &s, &cs) {
-            Some(gris) => {
-                let nuevo = doc.add_object(gris);
-                self.hechos.insert(id, nuevo);
-                nuevo
-            }
-            None => {
-                self.avisar("hay imágenes que no se pudieron pasar a negro (quedaron en color)");
-                id
-            }
-        }
+        let directa = if matches!(cs, Espacio::Otro | Espacio::Lab) { None } else { self.imagen_gris(doc, &s, &cs) };
+        let nuevo = match directa {
+            Some(gris) => doc.add_object(gris),
+            // JPEG 2000, 16 bits, espacios raros…: negro por máscara de su luminosidad.
+            None => self.negro_por_mascara(
+                doc,
+                b"q /I Do Q".to_vec(),
+                dictionary! { "XObject" => dictionary! { "I" => id } },
+                [0.0, 0.0, 1.0, 1.0],
+            ),
+        };
+        self.hechos.insert(id, nuevo);
+        nuevo
+    }
+
+    /// Una sola tinta para lo que no se puede convertir directamente: un
+    /// relleno de negro 100 % (K) con una máscara de luminosidad del dibujo
+    /// original (invertida: donde el dibujo es oscuro hay más negro). El RIP o
+    /// el visor leen el dibujo, sea del formato que sea, y solo sale negro.
+    /// Necesita transparencia (PDF/X-4 o un RIP moderno).
+    fn negro_por_mascara(
+        &mut self,
+        doc: &mut Document,
+        dibujo: Vec<u8>,
+        recursos: Dictionary,
+        caja: [f64; 4],
+    ) -> ObjectId {
+        self.avisar(
+            "algunas imágenes o degradados se pasaron a negro con una máscara de luminosidad (necesita un RIP con transparencia, p. ej. PDF/X-4)",
+        );
+        let bbox: Vec<Object> = caja.iter().map(|v| Object::Real(*v as f32)).collect();
+        let grupo = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => bbox.clone(),
+                "Group" => dictionary! { "Type" => "Group", "S" => "Transparency", "CS" => "DeviceGray" },
+                "Resources" => recursos,
+            },
+            dibujo,
+        ));
+        let inversa = doc.add_object(Stream::new(
+            dictionary! {
+                "FunctionType" => 4,
+                "Domain" => vec![0.into(), 1.into()],
+                "Range" => vec![0.into(), 1.into()],
+            },
+            b"{1 exch sub}".to_vec(),
+        ));
+        let estado = dictionary! {
+            "Type" => "ExtGState",
+            "SMask" => dictionary! { "Type" => "Mask", "S" => "Luminosity", "G" => grupo, "BC" => vec![1.into()], "TR" => inversa },
+        };
+        let [x0, y0, x1, y1] = caja;
+        let contenido = format!("q /M gs 0 0 0 1 k {x0} {y0} {} {} re f Q", x1 - x0, y1 - y0);
+        doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => bbox,
+                "Resources" => dictionary! { "ExtGState" => dictionary! { "M" => estado } },
+            },
+            contenido.into_bytes(),
+        ))
     }
 
     fn imagen_gris(&self, doc: &Document, s: &Stream, cs: &Espacio) -> Option<Stream> {
@@ -439,16 +524,19 @@ impl Conversor {
     }
 
     /// Flujo de contenido con todos los colores en gris.
+    /// Devuelve también las imágenes incrustadas (BI … EI) que pasaron a ser
+    /// XObjects (nombre y objeto) para agregarlas a los recursos.
     fn contenido(
         &mut self,
-        doc: &Document,
+        doc: &mut Document,
         datos: &[u8],
         recursos: Option<&Dictionary>,
-        _profundidad: usize,
-    ) -> Vec<u8> {
+        sombras: &[(Vec<u8>, ObjectId)],
+    ) -> (Vec<u8>, Vec<(Vec<u8>, ObjectId)>) {
+        let mut extra = Vec::new();
         let Ok(c) = Content::decode(datos) else {
             self.avisar("parte del contenido no se pudo leer y quedó en color");
-            return datos.to_vec();
+            return (datos.to_vec(), extra);
         };
         let mut relleno = Espacio::Gris;
         let mut trazo = Espacio::Gris;
@@ -521,12 +609,121 @@ impl Conversor {
                         continue;
                     }
                 }
-                "BI" => self.avisar("hay imágenes incrustadas en el contenido que quedaron en color"),
+                // Degradado que no se pudo convertir: su forma en negro por máscara.
+                "sh" => {
+                    if let Some(n) = op.operands.first().and_then(nombre)
+                        && sombras.iter().any(|(s, _)| s.as_slice() == n)
+                    {
+                        salida.push(Operation::new("Do", vec![Object::Name(nombre_sombra(n))]));
+                        continue;
+                    }
+                }
+                // Imagen incrustada: pasa a ser una imagen XObject y se convierte como las demás.
+                "BI" => {
+                    if let Some(Object::Stream(st)) = op.operands.first()
+                        && let Some(img) = imagen_incrustada(doc, st, recursos)
+                    {
+                        let mascara = img.dict.get(b"ImageMask").ok().and_then(|o| o.as_bool().ok()) == Some(true);
+                        if !mascara {
+                            let id = doc.add_object(img);
+                            let convertida = self.imagen(doc, id);
+                            let n = format!("KIn{}", extra.len() + 1).into_bytes();
+                            extra.push((n.clone(), convertida));
+                            salida.push(Operation::new("Do", vec![Object::Name(n)]));
+                            continue;
+                        }
+                    }
+                }
                 _ => {}
             }
             salida.push(op);
         }
-        Content { operations: salida }.encode().unwrap_or_else(|_| datos.to_vec())
+        (Content { operations: salida }.encode().unwrap_or_else(|_| datos.to_vec()), extra)
+    }
+}
+
+/// Nombre del XObject que reemplaza a un degradado pintado por máscara.
+fn nombre_sombra(n: &[u8]) -> Vec<u8> {
+    [b"KSh".as_slice(), n].concat()
+}
+
+/// Imagen incrustada (BI … ID … EI) como imagen XObject: claves y nombres
+/// abreviados a su forma completa.
+fn imagen_incrustada(doc: &Document, st: &Stream, recursos: Option<&Dictionary>) -> Option<Stream> {
+    let largo = |k: &[u8]| -> Vec<u8> {
+        match k {
+            b"W" => b"Width".to_vec(),
+            b"H" => b"Height".to_vec(),
+            b"BPC" => b"BitsPerComponent".to_vec(),
+            b"CS" => b"ColorSpace".to_vec(),
+            b"F" => b"Filter".to_vec(),
+            b"DP" => b"DecodeParms".to_vec(),
+            b"D" => b"Decode".to_vec(),
+            b"IM" => b"ImageMask".to_vec(),
+            b"I" => b"Interpolate".to_vec(),
+            otra => otra.to_vec(),
+        }
+    };
+    let valor = |o: &Object| -> Object {
+        match o {
+            Object::Name(n) => Object::Name(
+                match n.as_slice() {
+                    b"G" => b"DeviceGray".as_slice(),
+                    b"RGB" => b"DeviceRGB",
+                    b"CMYK" => b"DeviceCMYK",
+                    b"I" => b"Indexed",
+                    b"AHx" => b"ASCIIHexDecode",
+                    b"A85" => b"ASCII85Decode",
+                    b"LZW" => b"LZWDecode",
+                    b"Fl" => b"FlateDecode",
+                    b"RL" => b"RunLengthDecode",
+                    b"CCF" => b"CCITTFaxDecode",
+                    b"DCT" => b"DCTDecode",
+                    otro => otro,
+                }
+                .to_vec(),
+            ),
+            Object::Array(a) => Object::Array(
+                a.iter().map(|x| if let Object::Name(_) = x { valor_simple(x) } else { x.clone() }).collect(),
+            ),
+            otro => otro.clone(),
+        }
+    };
+    let mut dict = dictionary! { "Type" => "XObject", "Subtype" => "Image" };
+    for (k, v) in st.dict.iter() {
+        let clave = largo(k);
+        let mut v = valor(v);
+        // Espacio de color con nombre de recurso (/CS /Cs1).
+        if clave == b"ColorSpace"
+            && let Object::Name(n) = &v
+            && !matches!(n.as_slice(), b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK")
+            && let Some(cs) = recursos
+                .and_then(|r| r.get(b"ColorSpace").ok())
+                .and_then(|t| resolver(doc, t).as_dict().ok())
+                .and_then(|t| t.get(n).ok())
+        {
+            v = cs.clone();
+        }
+        dict.set(clave, v);
+    }
+    dict.has(b"Width").then(|| Stream::new(dict, st.content.clone()))
+}
+
+/// Nombre abreviado de filtro o espacio dentro de un arreglo (imagen incrustada).
+fn valor_simple(o: &Object) -> Object {
+    match o.as_name() {
+        Ok(b"AHx") => Object::Name(b"ASCIIHexDecode".to_vec()),
+        Ok(b"A85") => Object::Name(b"ASCII85Decode".to_vec()),
+        Ok(b"LZW") => Object::Name(b"LZWDecode".to_vec()),
+        Ok(b"Fl") => Object::Name(b"FlateDecode".to_vec()),
+        Ok(b"RL") => Object::Name(b"RunLengthDecode".to_vec()),
+        Ok(b"CCF") => Object::Name(b"CCITTFaxDecode".to_vec()),
+        Ok(b"DCT") => Object::Name(b"DCTDecode".to_vec()),
+        Ok(b"I") => Object::Name(b"Indexed".to_vec()),
+        Ok(b"RGB") => Object::Name(b"DeviceRGB".to_vec()),
+        Ok(b"CMYK") => Object::Name(b"DeviceCMYK".to_vec()),
+        Ok(b"G") => Object::Name(b"DeviceGray".to_vec()),
+        _ => o.clone(),
     }
 }
 
@@ -620,5 +817,36 @@ mod pruebas {
         assert_eq!(im.dict.get(b"ColorSpace").unwrap().as_name().unwrap(), b"DeviceGray");
         assert_eq!(im.decompressed_content().unwrap(), vec![77, 255]);
         assert!(conv.avisos.is_empty());
+    }
+
+    #[test]
+    fn lo_que_no_se_puede_leer_va_en_negro_por_mascara() {
+        let mut doc = Document::with_version("1.7");
+        // Imagen de 16 bits (no se convierte directo) y una imagen incrustada RGB.
+        let img = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => 1, "Height" => 1,
+                "BitsPerComponent" => 16, "ColorSpace" => "DeviceRGB",
+            },
+            vec![255, 255, 0, 0, 0, 0],
+        ));
+        let forma = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+                "Resources" => dictionary! { "XObject" => dictionary! { "Im" => img } },
+            },
+            b"/Im Do BI /W 1 /H 1 /BPC 8 /CS /RGB ID \xff\x00\x00 EI".to_vec(),
+        ));
+        let mut conv = Conversor::new();
+        let gris = conv.forma(&mut doc, forma);
+        let s = doc.get_object(gris).unwrap().as_stream().unwrap();
+        let texto = String::from_utf8_lossy(&s.decompressed_content().unwrap()).to_string();
+        assert!(!texto.contains("BI"), "la imagen incrustada pasa a XObject: {texto}");
+        let x = s.dict.get(b"Resources").unwrap().as_dict().unwrap().get(b"XObject").unwrap().as_dict().unwrap();
+        let im = doc.get_object(x.get(b"Im").unwrap().as_reference().unwrap()).unwrap().as_stream().unwrap();
+        // La de 16 bits queda como un relleno de negro con máscara de luminosidad.
+        assert_eq!(im.dict.get(b"Subtype").unwrap().as_name().unwrap(), b"Form");
+        assert!(String::from_utf8_lossy(&im.content).contains("0 0 0 1 k"));
+        assert!(conv.avisos.iter().any(|a| a.contains("máscara")));
     }
 }
