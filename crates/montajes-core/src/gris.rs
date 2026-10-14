@@ -446,16 +446,10 @@ impl Conversor {
                 };
                 let mut pix = pix;
                 if n == 4 {
-                    // El decodificador entrega los CMYK invertidos (255 − valor); el
-                    // PDF aplica /Decode a los valores tal como vienen en el JPEG.
-                    let ycck = transformacion_adobe(&datos) == Some(2);
-                    for c in pix.chunks_exact_mut(4) {
-                        if ycck {
-                            c[3] = 255 - c[3];
-                        } else {
-                            c.iter_mut().for_each(|v| *v = 255 - *v);
-                        }
-                    }
+                    // El decodificador entrega 255 − valor (en YCCK, R G B y 255 − K);
+                    // el filtro DCTDecode del PDF da C = 255 − R … y K tal cual, y
+                    // /Decode se aplica a esos valores: se invierte todo.
+                    pix.iter_mut().for_each(|v| *v = 255 - *v);
                 }
                 (pix, n, 8)
             }
@@ -727,27 +721,6 @@ fn valor_simple(o: &Object) -> Object {
     }
 }
 
-/// Transformación de color del marcador Adobe (APP14) de un JPEG: 0 sin
-/// transformar, 1 YCbCr, 2 YCCK.
-fn transformacion_adobe(jpeg: &[u8]) -> Option<u8> {
-    let mut i = 2;
-    while i + 4 <= jpeg.len() {
-        if jpeg[i] != 0xFF {
-            return None;
-        }
-        let marca = jpeg[i + 1];
-        let largo = usize::from(u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]));
-        if marca == 0xEE && jpeg.get(i + 4..i + 9) == Some(b"Adobe") {
-            return jpeg.get(i + 4 + 11).copied();
-        }
-        if marca == 0xDA {
-            return None;
-        }
-        i += 2 + largo;
-    }
-    None
-}
-
 /// Función de degradado que da gris (tipos 2 y 3; los demás no se convierten).
 fn funcion_gris(doc: &Document, f: &Object, cs: &Espacio) -> Option<Object> {
     let d = match resolver(doc, f) {
@@ -817,6 +790,35 @@ mod pruebas {
         assert_eq!(im.dict.get(b"ColorSpace").unwrap().as_name().unwrap(), b"DeviceGray");
         assert_eq!(im.decompressed_content().unwrap(), vec![77, 255]);
         assert!(conv.avisos.is_empty());
+    }
+
+    #[test]
+    fn jpeg_ycck_no_sale_en_negativo() {
+        // JPEG CMYK de Photoshop/ImageMagick (YCCK, invertido): K 20 %.
+        let mut doc = Document::with_version("1.7");
+        let img = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => 8, "Height" => 8,
+                "BitsPerComponent" => 8, "ColorSpace" => "DeviceCMYK", "Filter" => "DCTDecode",
+                "Decode" => vec![1.into(), 0.into(), 1.into(), 0.into(), 1.into(), 0.into(), 1.into(), 0.into()],
+            },
+            include_bytes!("../tests/datos/ycck.jpg").to_vec(),
+        ));
+        let forma = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+                "Resources" => dictionary! { "XObject" => dictionary! { "Im" => img } },
+            },
+            b"/Im Do".to_vec(),
+        ));
+        let mut conv = Conversor::new();
+        let gris = conv.forma(&mut doc, forma);
+        let s = doc.get_object(gris).unwrap().as_stream().unwrap();
+        let x = s.dict.get(b"Resources").unwrap().as_dict().unwrap().get(b"XObject").unwrap().as_dict().unwrap();
+        let im = doc.get_object(x.get(b"Im").unwrap().as_reference().unwrap()).unwrap().as_stream().unwrap();
+        let pix = im.decompressed_content().unwrap();
+        let medio = pix.iter().map(|&v| f64::from(v)).sum::<f64>() / pix.len() as f64;
+        assert!((medio - 204.0).abs() < 8.0, "gris {medio}");
     }
 
     #[test]
