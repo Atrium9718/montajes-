@@ -310,3 +310,121 @@ Trabajo
 - [x] **Rebase automático por borde** (predeterminado en Piezas y Libros): la app mira con pdf.js cada borde de cada página (a 2 px/mm) y elige: el rebase que trae el PDF si es continuación limpia de la orilla; si no, espejo (sigue degradados, fotos y texturas); y color plano del fondo si junto al corte hay textos o QR que el espejo repetiría. El motor lo arma por lados (`pdf::colocar_por_lados`): franjas en espejo o estiradas debajo, la página con su rebase original donde se usa, y el color encima. También se puede forzar un modo (original, espejo, estirar, color). La vista previa dibuja lo mismo que el PDF.
 - [x] **Vista previa con el contenido real** de cada página (pdf.js), colocada con la misma matriz que usa el motor.
 - [ ] Fase 3, pendiente: firmas de 12/24 pp, varias firmas iguales por pliego (work & turn de firmas), insertos.
+
+---
+
+## 11. Plataforma de pedidos (planeación, octubre 2026)
+
+Objetivo: que cualquiera, sea una litografía o un cliente final, pueda **pedir y pagar cada servicio** (montaje, plegable, libro, carátula, diagramación) con un formulario guiado o un chat que hace casi todo solo. Los archivos se guardan en el **Google Drive del dueño**, no en el hosting, y el dueño (superadministrador) ve todos los pedidos y revisa que hayan quedado bien montados.
+
+Decisiones tomadas:
+- **Usuarios: ambos tipos.** Las litografías montan solas con sus máquinas y papeles. Los clientes finales (diseñadores, editoriales, personas) piden el montaje, y el dueño lo revisa y lo entrega.
+- **Cobro mixto.** La suscripción trae una bolsa de montajes por mes. Lo que pase de la bolsa, y todo lo de quien no está suscrito, se paga por servicio.
+- **Asistente: formulario paso a paso más un chat opcional.** El chat llena el mismo formulario.
+- **Drive: uno solo, el del dueño**, con carpetas por cliente y pedido.
+
+### 11.1 Lo que ya existe y se reutiliza
+- **Cuentas:**
+  - Cuentas de empresa o independiente, con verificación por correo.
+  - Roles: dueño, administrador y operador, más el superadministrador.
+  - Sesiones y límite de intentos.
+- **Wompi:** Web Checkout para pagos únicos, tarjeta tokenizada y webhook firmado (`web/api/pagos.php`, `lib/cobro.php`). Para pagar un pedido solo falta otra «razón de cobro».
+- **Panel del superadministrador** (`web/api/admin.php`): empresas, pagos, precios, cortesías y bitácora.
+- **Catálogo de máquinas y papeles por empresa** en el servidor, con el buscador de máquinas.
+- **El motor de imposición corre en el navegador** (WASM). Así el montaje no carga el servidor: el hosting solo guarda datos pequeños.
+
+### 11.2 Modelo de datos nuevo (SQLite)
+| Tabla | Campos principales |
+|---|---|
+| `servicios` | clave (volante, plegable, libro, caratula, diagramacion, revision), nombre, descripción, precio base, precio por página o por pieza, montajes de la bolsa que consume, activo |
+| `pedidos` | id, empresa_id, usuario_id, servicio, estado, parámetros (JSON: tamaño, cantidad, tintas, máquina, papel, acabado), precio, pago_id, carpeta_drive, verificación (compaginación + preflight), notas del cliente, notas de revisión, creado, actualizado |
+| `archivos` | pedido_id, rol (original, montaje, carátula, informe, miniatura), nombre, tamaño, sha256, id en Drive, creado |
+| `consumos` | empresa_id, mes, montajes usados (contra la bolsa del plan) |
+| `mensajes` | pedido_id, autor, texto, momento (conversación cliente ↔ revisor y registro del chat) |
+
+Estados del pedido: `borrador → por_pagar → pagado → montado → en_revision → aprobado | con_observaciones → entregado`. Una litografía con «autoaprobar» pasa directo de `montado` a `entregado`. Un cliente final siempre pasa por revisión, salvo que el dueño la apague.
+
+### 11.3 Archivos en Google Drive (el hosting no toca los bytes)
+- **Conexión una sola vez:** desde el panel, el dueño conecta su cuenta de Google con OAuth (permiso `drive.file`).
+  - El token de renovación se guarda cifrado en `datos-montajes/config.json`, fuera de `public_html`.
+  - No se usa una cuenta de servicio: esas cuentas no tienen espacio en un Drive personal.
+- **Subida directa:**
+  1. El servidor abre una sesión de subida reanudable (*resumable upload*) en la carpeta del pedido, enviando la cabecera `Origin` de la app.
+  2. Le entrega al navegador solo la URL de esa sesión.
+  3. El navegador sube el PDF directo a Google, en partes y con reintento.
+  4. Al terminar, el servidor solo anota el id del archivo.
+  - Al hosting nunca pasa un PDF.
+- **El montaje también:** el PDF montado se genera en el navegador y se sube igual, junto con el informe (JSON) y una miniatura PNG para el panel.
+- **Carpetas:** `Macula / Clientes / {empresa} / {AAAA-MM} / {pedido} - {servicio}`.
+- **Descargas:**
+  - El cliente descarga su montaje apenas sale, desde su navegador.
+  - Para después (y para el revisor), un enlace del pedido que abre el archivo en Drive. Se comparte con el correo del cliente; si no es de Google, «cualquiera con el enlace» y se revoca a los 30 días.
+- **Límites a tener en cuenta:**
+  - El espacio del Drive del dueño: 15 GB gratis; con Google One, 2 TB.
+  - Google permite subir 750 GB por día.
+  - El panel mostrará el espacio usado y avisará al 80 %.
+
+### 11.4 Formulario guiado («modo fácil»)
+Una pantalla de inicio con botones grandes: **Volantes y tarjetas · Plegable · Libro o revista · Carátula · Diagramar mi libro**.
+
+Cada uno es un asistente de 4 pasos, con lo técnico ya decidido por defecto:
+1. **Sube tu archivo.**
+   - Se lee el PDF: tamaño, páginas, rebase, colores.
+   - Se proponen el producto y los datos («27,9 × 21,6 cm, 2 páginas: ¿volante tiro y retiro?»).
+2. **Cuántos y en qué.** Cantidad, papel y tintas.
+   - Las litografías eligen su máquina.
+   - El cliente final elige «que la imprenta decida» o un tamaño de pliego.
+3. **Vista previa y verificación.**
+   - El motor monta en el navegador y muestra el pliego tal como queda el PDF.
+   - Muestra el preflight en lenguaje simple y la compaginación verificada en libros.
+   - Muestra el precio y si cabe en la bolsa del plan.
+4. **Pagar y recibir.**
+   - Paga con Wompi (o descuenta de la bolsa).
+   - Al aprobarse el pago, el montaje se sube a Drive y queda para revisión o para descargar.
+
+El **modo avanzado** (la app actual) sigue igual para quien quiera mover todo a mano.
+
+### 11.5 Chat que arma el pedido
+- Es una burbuja de chat en el asistente: «Tengo un tríptico de 28 × 21,5 para 1.000 unidades a 4 tintas».
+- **Claude con herramientas:** el modelo no inventa el montaje, llena los campos del formulario.
+  - Herramientas: `elegir_servicio`, `fijar_campo`, `leer_informe_pdf`, `ver_vista_previa`, `cotizar`.
+  - El motor hace el cálculo, y el chat explica el resultado y lo que falta («tu PDF no trae rebase; lo genero extendiendo el fondo, ¿de acuerdo?»).
+- **La llave de API vive en el servidor**, en `config.json`, y el chat pasa por `web/api/chat.php`.
+  - Se usa un modelo pequeño y barato para conversar.
+  - Límite de mensajes por cuenta y por día, y registro del costo en el panel.
+- Nunca ve las llaves de pago ni otros clientes: solo el pedido abierto.
+
+### 11.6 Máquinas y papeles más fáciles
+- **Máquina:**
+  - Escribir el modelo («Heidelberg SM 74») y elegir del buscador, que ya llena el formulario.
+  - Confirmar solo pliego máximo y mínimo, pinza y tipo (offset o digital).
+  - El resto queda con valores por defecto editables.
+- **Papel:** elegir de una lista común (bond, propalcote, esmaltado, cartulinas) con gramajes y formatos de compra de Colombia, más el precio.
+- **Clientes finales:** no crean máquinas. Usan las máquinas de referencia del dueño o eligen «que la imprenta decida».
+
+### 11.7 Panel del superadministrador: pedidos
+- **Lista de pedidos:**
+  - Filtros por estado, cliente, servicio y fecha, con miniatura, precio y pago.
+  - Alertas: preflight con errores, compaginación no verificada, pago pendiente.
+- **Abrir un pedido:**
+  - Carga los archivos desde Drive en el visor de la app con los mismos parámetros, así se ve exactamente el montaje entregado y se puede rehacer.
+  - Botones: **Aprobar · Pedir corrección (con nota) · Rehacer y reemplazar**.
+  - Cada acción avisa al cliente por correo.
+- **Resumen:** pedidos del día y del mes, ingresos por servicio, bolsa consumida por plan, espacio de Drive, costo del chat.
+
+### 11.8 Orden de trabajo (fases)
+| Fase | Alcance | Listo cuando |
+|---|---|---|
+| **A. Pedidos + Drive** | Tablas `pedidos` y `archivos`, conexión OAuth con Drive desde el panel, subida directa reanudable, lista de pedidos en el panel | Un montaje hecho en la app queda guardado como pedido con sus archivos en el Drive |
+| **B. Servicios y cobro por pedido** | Tabla `servicios` editable en el panel, precio por servicio y por página o pieza, pago por pedido con Wompi, bolsa mensual por plan y consumos | Se puede pagar un pedido suelto y el suscrito ve su bolsa |
+| **C. Modo fácil** | Inicio con botones, asistente de 4 pasos, detección del producto al subir el PDF, preflight en lenguaje simple, registro para clientes finales | Un cliente final, sin saber de imposición, sube, paga y recibe |
+| **D. Revisión y entrega** | Estados, aprobar o pedir corrección, mensajes, correos, enlaces de descarga con vencimiento | El dueño revisa y el cliente recibe el aviso |
+| **E. Chat** | `chat.php` con herramientas sobre el formulario, límites y costo | Se puede pedir un montaje conversando |
+| **F. Catálogo fácil** | Asistente de máquina y lista de papeles comunes | Una litografía configura su primera máquina en 2 minutos |
+
+Orden recomendado: A → B → C → D → E → F. A y B dan la base de pedidos y cobro; C es lo que más simplifica para el cliente.
+
+### 11.9 Pendientes de decidir
+- **Precios** de cada servicio y tamaño de la bolsa por plan.
+- **Factura electrónica (DIAN):** Wompi cobra pero no factura. Hay que definir si se conecta un proveedor (Siigo, Alegra) o se factura aparte.
+- **Datos personales:** aviso de privacidad y tratamiento de datos (Ley 1581) para los archivos de los clientes, y cuánto tiempo se guardan en el Drive.
